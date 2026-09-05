@@ -61,3 +61,19 @@ add_executable(run_concurrent_tests
 
 target_link_libraries(run_concurrent_tests gtest_main)
 add_test(NAME concurrent_tests COMMAND run_concurrent_tests)
+# TradeLogger test executable
+find_package(Threads REQUIRED)
+
+add_executable(run_tradelogger_tests
+    tests/test_tradelogger.cpp
+    src/TradeLogger.cpp
+)
+
+target_link_libraries(run_tradelogger_tests PRIVATE
+    gtest_main
+    Threads::Threads
+)
+
+target_compile_features(run_tradelogger_tests PRIVATE cxx_std_17)
+
+add_test(NAME tradelogger_tests COMMAND run_tradelogger_tests)
