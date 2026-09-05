@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-asan:
+    name: AddressSanitizer Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure CMake (ASan)
+      run: |
+        mkdir build-asan
+        cd build-asan
+        cmake -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" ..
+
+    - name: Build
+      run: |
+        cd build-asan
+        cmake --build .
+
+    - name: Run tests
+      run: |
+        cd build-asan
+        ctest --output-on-failure
+
+  test-tsan:
+    name: ThreadSanitizer Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Configure CMake (TSan with Clang)
+      run: |
+        mkdir build-tsan
+        cd build-tsan
+        cmake -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" ..
+
+    - name: Build
+      run: |
+        cd build-tsan
+        cmake --build .
+
+    - name: Run tests
+      run: |
+        cd build-tsan
+        ctest --output-on-failure
