@@ -2,23 +2,23 @@
 #ifndef ORDERBOOK_H
 #define ORDERBOOK_H
 
-#include <map>
 #include <vector>
+#include <algorithm>
+#include <cstdint>
+#include <cstddef>
 #include "Order.h"
 #include "Trade.h"
 
-// Self-trade prevention policy
 enum class STPPolicy {
-    NONE,           // no prevention (default)
-    CANCEL_NEWEST,  // cancel incoming order
-    CANCEL_OLDEST,  // cancel resting order
-    CANCEL_BOTH     // cancel both orders
+    NONE,
+    CANCEL_NEWEST,
+    CANCEL_OLDEST,
+    CANCEL_BOTH
 };
 
 class OrderBook {
 public:
-    OrderBook();  // initializes next_trade_id_ and stp_policy_
-
+    OrderBook();
     void addOrder(const Order& order);
     bool cancelOrder(uint64_t order_id);
     std::vector<Trade> matchOrder(Order& incoming);
@@ -26,19 +26,28 @@ public:
     double getBestAsk() const;
     size_t getOrderCount() const;
     void printBook() const;
-
-    // STP configuration
     void setSTPPolicy(STPPolicy policy) { stp_policy_ = policy; }
     STPPolicy getSTPPolicy() const { return stp_policy_; }
 
 private:
-    std::map<double, std::vector<Order>, std::greater<double>> bids_;
-    std::map<double, std::vector<Order>, std::less<double>> asks_;
+    struct PriceLevel {
+        double price;
+        std::vector<Order> orders;
+    };
+
+    std::vector<PriceLevel> bids_;  // sorted descending
+    std::vector<PriceLevel> asks_;  // sorted ascending
+
     uint64_t next_trade_id_;
     STPPolicy stp_policy_;
 
     bool canFullyFill(const Order& incoming) const;
     bool wouldSelfTrade(const Order& incoming) const;
+    size_t findBidLevel(double price) const;
+    size_t findAskLevel(double price) const;
 };
+
+// NOTE: This class is NOT thread-safe. It must only be accessed from
+// a single thread (typically the consumer thread in ConcurrentMatchingEngine).
 
 #endif // ORDERBOOK_H
