@@ -1,18 +1,19 @@
 // src/RingBuffer.cpp
 #include "../include/RingBuffer.h"
 #include <thread>
-#include <cassert>
+#include <stdexcept>
 
-RingBuffer::RingBuffer(size_t size) 
+RingBuffer::RingBuffer(size_t size)
     : buffer_(size)
     , head_(0)
     , tail_(0)
     , capacity_(size)
     , mask_(size - 1)
 {
-    // Ensure size is power of 2 for efficient modulo
-    // (size & (size - 1)) == 0 checks power of 2
-    assert((size & (size - 1)) == 0 && "Size must be power of 2");
+    // Must be a non-zero power of 2, and at least 2 for at least one usable slot
+    if (size < 2 || (size & (size - 1)) != 0) {
+        throw std::invalid_argument("RingBuffer size must be a power of 2 (>= 2)");
+    }
 }
 
 bool RingBuffer::push(const Order& order) {

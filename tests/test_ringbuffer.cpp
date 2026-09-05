@@ -1,12 +1,13 @@
+// tests/test_ringbuffer.cpp
 #include <gtest/gtest.h>
 #include "RingBuffer.h"
 #include "Order.h"
 #include <thread>
 #include <vector>
+#include <atomic>
 
-// Test basic push/pop
 TEST(RingBufferTest, BasicPushPop) {
-    RingBuffer rb(4); // capacity 4, but one slot sacrificed -> 3 usable
+    RingBuffer rb(4);
     
     Order o1(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10);
     Order o2(2, 200, OrderSide::SELL, OrderType::LIMIT, 101.0, 20);
@@ -14,63 +15,93 @@ TEST(RingBufferTest, BasicPushPop) {
     EXPECT_TRUE(rb.push(o1));
     EXPECT_TRUE(rb.push(o2));
     
-    // Use dummy initialization because Order has no default constructor
-    Order result(0, 0, OrderSide::BUY, OrderType::MARKET, 0, 0);
+    Order result; // default constructor — placeholder, no validation
     EXPECT_TRUE(rb.pop(result));
     EXPECT_EQ(result.order_id, 1);
     EXPECT_TRUE(rb.pop(result));
     EXPECT_EQ(result.order_id, 2);
     
-    // Now empty
     EXPECT_TRUE(rb.isEmpty());
     EXPECT_FALSE(rb.pop(result));
 }
 
-// Test full condition
 TEST(RingBufferTest, FullBuffer) {
-    RingBuffer rb(4); // 3 usable slots
+    RingBuffer rb(4);
     
     Order o(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10);
     EXPECT_TRUE(rb.push(o));
     EXPECT_TRUE(rb.push(o));
     EXPECT_TRUE(rb.push(o));
-    EXPECT_FALSE(rb.push(o)); // 4th should fail (buffer full)
+    EXPECT_FALSE(rb.push(o));
 }
 
-// Test multithreaded producer-consumer
-TEST(RingBufferTest, ThreadedPushPop) {
-    RingBuffer rb(1024); // large capacity
-    
-    const int NUM_ITEMS = 1000;
+TEST(RingBufferTest, PushAfterPopWhenFull) {
+    RingBuffer rb(4);
+    Order o(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10);
+    EXPECT_TRUE(rb.push(o));
+    EXPECT_TRUE(rb.push(o));
+    EXPECT_TRUE(rb.push(o));
+    EXPECT_FALSE(rb.push(o));
+
+    Order out; // default placeholder
+    EXPECT_TRUE(rb.pop(out));
+    EXPECT_TRUE(rb.push(o));
+}
+
+TEST(RingBufferTest, WraparoundManyCycles) {
+    RingBuffer rb(4);
+    Order out; // default placeholder
+    for (int cycle = 0; cycle < 10000; ++cycle) {
+        Order o(cycle + 1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 1);
+        ASSERT_TRUE(rb.push(o));
+        ASSERT_TRUE(rb.pop(out));
+        EXPECT_EQ(out.order_id, cycle + 1);
+    }
+}
+
+TEST(RingBufferTest, ThreadedPushPopSmallCapacity) {
+    RingBuffer rb(8);
+    const int NUM_ITEMS = 200000;
     std::vector<Order> consumed;
     consumed.reserve(NUM_ITEMS);
-    
-    std::thread producer([&rb, NUM_ITEMS]() {
+    std::atomic<bool> stuck{false};
+
+    std::thread producer([&] {
         for (int i = 0; i < NUM_ITEMS; ++i) {
-            Order o(i, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 1);
+            Order o(i + 1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0 + i, i % 50 + 1);
+            int spins = 0;
             while (!rb.push(o)) {
-                // spin wait if full
+                if (++spins > 100000000) {
+                    stuck.store(true);
+                    return;
+                }
             }
         }
     });
-    
-    std::thread consumer([&rb, &consumed, NUM_ITEMS]() {
+
+    std::thread consumer([&] {
         for (int i = 0; i < NUM_ITEMS; ++i) {
-            Order o(0, 0, OrderSide::BUY, OrderType::MARKET, 0, 0);
+            Order o; // default placeholder
+            int spins = 0;
             while (!rb.pop(o)) {
-                // spin wait if empty
+                if (++spins > 100000000) {
+                    stuck.store(true);
+                    return;
+                }
             }
             consumed.push_back(o);
         }
     });
-    
+
     producer.join();
     consumer.join();
-    
+
+    ASSERT_FALSE(stuck.load());
     ASSERT_EQ(consumed.size(), NUM_ITEMS);
-    // Verify order ids are sequential (0 to NUM_ITEMS-1)
     for (int i = 0; i < NUM_ITEMS; ++i) {
-        EXPECT_EQ(consumed[i].order_id, i);
+        EXPECT_EQ(consumed[i].order_id, i + 1);
+        EXPECT_EQ(consumed[i].quantity, i % 50 + 1);
+        EXPECT_DOUBLE_EQ(consumed[i].price, 100.0 + i);
     }
 }
 

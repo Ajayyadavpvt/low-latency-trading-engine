@@ -5,73 +5,68 @@
 #include <cstdint>
 #include <string>
 #include <chrono>
+#include <stdexcept>
+#include <cmath>
 
-// OrderSide: BUY or SELL
-enum class OrderSide {
-    BUY,
-    SELL
-};
+enum class OrderSide { BUY, SELL };
+enum class OrderType { MARKET, LIMIT, IOC, FOK };
 
-// OrderType: Different types of orders
-enum class OrderType {
-    MARKET,     // Execute immediately at best available price
-    LIMIT,      // Execute at specified price or better
-    IOC,        // Immediate or Cancel: partially or fully fill immediately, cancel rest
-    FOK         // Fill or Kill: fill completely or cancel entirely
-};
-
-// struct used instead of class for performance (direct member access)
 struct Order {
-    // --- Identification ---
-    uint64_t order_id;   // Unique order ID (fixed width, fast)
-    uint64_t trader_id;  // ID of the trader who placed the order
+    uint64_t order_id;
+    uint64_t trader_id;
+    OrderSide side;
+    OrderType type;
+    double price;
+    uint32_t quantity;
+    uint32_t remaining_quantity;
+    std::chrono::nanoseconds timestamp;
+    std::chrono::nanoseconds received_time;
 
-    // --- Order Details ---
-    OrderSide side;      // BUY or SELL
-    OrderType type;      // MARKET, LIMIT, IOC, FOK
-    double price;        // Limit price (0 for MARKET orders)
-    uint32_t quantity;   // Original quantity
-    uint32_t remaining_quantity; // Quantity remaining after partial fills
-
-    // --- Timestamps (for latency measurement) ---
-    std::chrono::nanoseconds timestamp;       // Order creation time
-    std::chrono::nanoseconds received_time;   // Time when engine received it
-
-    // Default constructor (required for std::vector)
+    // Default constructor (for std::vector<Order> inside RingBuffer).
+    // Creates a placeholder object — validation is NOT applied here
+    // because containers need to default-construct empty slots.
     Order()
-        : order_id(0)
-        , trader_id(0)
-        , side(OrderSide::BUY)
-        , type(OrderType::MARKET)
-        , price(0.0)
-        , quantity(0)
-        , remaining_quantity(0)
-        , timestamp(std::chrono::high_resolution_clock::now().time_since_epoch())
-        , received_time(timestamp) {}
+        : order_id(0), trader_id(0), side(OrderSide::BUY), type(OrderType::MARKET),
+          price(0.0), quantity(0), remaining_quantity(0),
+          timestamp(std::chrono::steady_clock::now().time_since_epoch()),
+          received_time(timestamp) {}
 
-    // Parameterized constructor
-    Order(uint64_t oid, uint64_t tid, OrderSide s, OrderType t, 
+    // Parameterized constructor — full validation.
+    // Throws std::invalid_argument on invalid input.
+    Order(uint64_t oid, uint64_t tid, OrderSide s, OrderType t,
           double p, uint32_t qty)
-        : order_id(oid)
-        , trader_id(tid)
-        , side(s)
-        , type(t)
-        , price(p)
-        , quantity(qty)
-        , remaining_quantity(qty) // initially all quantity is pending
-        , timestamp(std::chrono::high_resolution_clock::now().time_since_epoch())
-        , received_time(timestamp) {}
+        : order_id(oid), trader_id(tid), side(s), type(t), price(p),
+          quantity(qty), remaining_quantity(qty),
+          timestamp(std::chrono::steady_clock::now().time_since_epoch()),
+          received_time(timestamp) {
 
-    // Helper: check if order is fully filled
+        if (qty == 0) {
+            throw std::invalid_argument("Order quantity must be positive");
+        }
+        if (oid == 0) {
+            throw std::invalid_argument("Order ID must be non-zero");
+        }
+        if (tid == 0) {
+            throw std::invalid_argument("Trader ID must be non-zero");
+        }
+
+        if (t == OrderType::MARKET) {
+            price = 0.0;
+        } else {
+            if (p <= 0.0 || std::isnan(p) || std::isinf(p)) {
+                throw std::invalid_argument("Limit/IOC/FOK order price must be positive and finite");
+            }
+        }
+    }
+
     bool is_filled() const {
         return remaining_quantity == 0;
     }
 
-    // Helper: for debugging
     std::string to_string() const {
         std::string side_str = (side == OrderSide::BUY) ? "BUY" : "SELL";
-        return "Order[" + std::to_string(order_id) + "] " + 
-               side_str + " " + std::to_string(remaining_quantity) + 
+        return "Order[" + std::to_string(order_id) + "] " +
+               side_str + " " + std::to_string(remaining_quantity) +
                "@" + std::to_string(price);
     }
 };

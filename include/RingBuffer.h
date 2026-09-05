@@ -10,34 +10,41 @@
 // Lock-free Single Producer Single Consumer (SPSC) ring buffer.
 // One thread pushes orders, another thread pops them.
 // No locks used - relies on atomic operations and memory ordering.
+//
+// IMPORTANT: This queue is strictly SPSC. Do NOT call push() from more
+// than one thread, or pop() from more than one thread.
+//
+// size() / isEmpty() / isFull() are advisory snapshots — they can be
+// stale the moment they're read, by design in a lock-free structure.
 class RingBuffer {
 public:
-    // Constructor: size must be power of 2 for efficient modulo operation.
+    // Constructor: size must be power of 2 for efficient modulo.
     explicit RingBuffer(size_t size);
 
-    // Push an order into the buffer (called by producer thread).
+    // Push an order into the buffer (producer thread only).
     // Returns true if successful, false if buffer is full.
     bool push(const Order& order);
 
-    // Pop an order from the buffer (called by consumer thread).
+    // Pop an order from the buffer (consumer thread only).
     // Returns true if successful, false if buffer is empty.
     bool pop(Order& order);
 
-    // Check if buffer is empty (consumer side).
     bool isEmpty() const;
-
-    // Check if buffer is full (producer side).
     bool isFull() const;
-
-    // Current number of elements in the buffer.
     size_t size() const;
 
 private:
+    static constexpr size_t kCacheLineSize = 64;
+
     std::vector<Order> buffer_;   // Fixed-size storage
-    std::atomic<size_t> head_;    // Consumer index (next pop position)
-    std::atomic<size_t> tail_;    // Producer index (next push position)
-    size_t capacity_;             // Total capacity (power of 2)
-    size_t mask_;                 // capacity_ - 1 for fast modulo
+
+    // Separate cache lines to avoid false sharing between producer
+    // (tail_) and consumer (head_) threads.
+    alignas(kCacheLineSize) std::atomic<size_t> tail_;  // producer only
+    alignas(kCacheLineSize) std::atomic<size_t> head_;  // consumer only
+
+    size_t capacity_;
+    size_t mask_;
 };
 
 #endif // RINGBUFFER_H

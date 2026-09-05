@@ -4,50 +4,41 @@
 
 #include <map>
 #include <vector>
-#include <memory>
 #include "Order.h"
 #include "Trade.h"
 
-// OrderBook maintains buy and sell orders in price-time priority.
-// Bids (buy orders) are sorted descending by price (best bid = highest price).
-// Asks (sell orders) are sorted ascending by price (best ask = lowest price).
-// If two orders have same price, earlier order gets priority (time priority).
+// Self-trade prevention policy
+enum class STPPolicy {
+    NONE,           // no prevention (default)
+    CANCEL_NEWEST,  // cancel incoming order
+    CANCEL_OLDEST,  // cancel resting order
+    CANCEL_BOTH     // cancel both orders
+};
+
 class OrderBook {
 public:
-    // Add a new order to the book
+    OrderBook();  // initializes next_trade_id_ and stp_policy_
+
     void addOrder(const Order& order);
-
-    // Cancel an existing order by its ID
-    // Returns true if order was found and canceled, false otherwise
     bool cancelOrder(uint64_t order_id);
-
-    // Match an incoming order against existing orders
-    // Returns a vector of trades generated
     std::vector<Trade> matchOrder(Order& incoming);
-
-    // Get current best bid price (highest buy price)
-    // Returns 0 if no bids exist
     double getBestBid() const;
-
-    // Get current best ask price (lowest sell price)
-    // Returns 0 if no asks exist
     double getBestAsk() const;
-
-    // Get number of orders in the book (total)
     size_t getOrderCount() const;
-
-    // Print the order book for debugging (optional)
     void printBook() const;
 
+    // STP configuration
+    void setSTPPolicy(STPPolicy policy) { stp_policy_ = policy; }
+    STPPolicy getSTPPolicy() const { return stp_policy_; }
+
 private:
-    // Bids: price -> list of orders at that price (orders in time priority)
     std::map<double, std::vector<Order>, std::greater<double>> bids_;
-
-    // Asks: price -> list of orders at that price (orders in time priority)
     std::map<double, std::vector<Order>, std::less<double>> asks_;
+    uint64_t next_trade_id_;
+    STPPolicy stp_policy_;
 
-    // Helper: Generate trade between buy and sell orders
-    Trade createTrade(const Order& buy, const Order& sell, uint32_t qty, double price);
+    bool canFullyFill(const Order& incoming) const;
+    bool wouldSelfTrade(const Order& incoming) const;
 };
 
 #endif // ORDERBOOK_H
