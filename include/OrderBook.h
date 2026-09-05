@@ -8,6 +8,7 @@
 #include <cstddef>
 #include "Order.h"
 #include "Trade.h"
+#include "OrderQueue.h"
 
 enum class STPPolicy {
     NONE,
@@ -32,7 +33,7 @@ public:
 private:
     struct PriceLevel {
         double price;
-        std::vector<Order> orders;
+        OrderQueue orders;  // vector-backed queue (O(1) pop_front)
     };
 
     std::vector<PriceLevel> bids_;  // sorted descending

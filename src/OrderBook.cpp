@@ -5,37 +5,67 @@
 
 OrderBook::OrderBook() : next_trade_id_(1), stp_policy_(STPPolicy::NONE) {}
 
+size_t OrderBook::findBidLevel(double price) const {
+    size_t low = 0, high = bids_.size();
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (bids_[mid].price > price) low = mid + 1;
+        else high = mid;
+    }
+    return low;
+}
+
+size_t OrderBook::findAskLevel(double price) const {
+    size_t low = 0, high = asks_.size();
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (asks_[mid].price < price) low = mid + 1;
+        else high = mid;
+    }
+    return low;
+}
+
 void OrderBook::addOrder(const Order& order) {
     if (order.side == OrderSide::BUY) {
-        bids_[order.price].push_back(order);
+        size_t idx = findBidLevel(order.price);
+        if (idx < bids_.size() && bids_[idx].price == order.price) {
+            bids_[idx].orders.push_back(order);
+        } else {
+            PriceLevel level;
+            level.price = order.price;
+            level.orders.push_back(order);
+            bids_.insert(bids_.begin() + idx, std::move(level));
+        }
     } else {
-        asks_[order.price].push_back(order);
+        size_t idx = findAskLevel(order.price);
+        if (idx < asks_.size() && asks_[idx].price == order.price) {
+            asks_[idx].orders.push_back(order);
+        } else {
+            PriceLevel level;
+            level.price = order.price;
+            level.orders.push_back(order);
+            asks_.insert(asks_.begin() + idx, std::move(level));
+        }
     }
 }
 
 bool OrderBook::cancelOrder(uint64_t order_id) {
-    // Search bids
-    for (auto it = bids_.begin(); it != bids_.end(); ++it) {
-        auto& orders = it->second;
-        for (auto oit = orders.begin(); oit != orders.end(); ++oit) {
-            if (oit->order_id == order_id) {
-                orders.erase(oit);
-                if (orders.empty()) {
-                    bids_.erase(it);
-                }
+    for (size_t i = 0; i < bids_.size(); ++i) {
+        auto& level = bids_[i];
+        for (auto it = level.orders.begin(); it != level.orders.end(); ++it) {
+            if (it->order_id == order_id) {
+                level.orders.erase(it);
+                if (level.orders.empty()) bids_.erase(bids_.begin() + i);
                 return true;
             }
         }
     }
-    // Search asks
-    for (auto it = asks_.begin(); it != asks_.end(); ++it) {
-        auto& orders = it->second;
-        for (auto oit = orders.begin(); oit != orders.end(); ++oit) {
-            if (oit->order_id == order_id) {
-                orders.erase(oit);
-                if (orders.empty()) {
-                    asks_.erase(it);
-                }
+    for (size_t i = 0; i < asks_.size(); ++i) {
+        auto& level = asks_[i];
+        for (auto it = level.orders.begin(); it != level.orders.end(); ++it) {
+            if (it->order_id == order_id) {
+                level.orders.erase(it);
+                if (level.orders.empty()) asks_.erase(asks_.begin() + i);
                 return true;
             }
         }
@@ -46,34 +76,19 @@ bool OrderBook::cancelOrder(uint64_t order_id) {
 bool OrderBook::canFullyFill(const Order& incoming) const {
     uint32_t needed = incoming.remaining_quantity;
     uint32_t available = 0;
-    uint64_t trader = incoming.trader_id;
 
     if (incoming.side == OrderSide::BUY) {
-        for (const auto& entry : asks_) {
-            double ask_price = entry.first;
-            if (incoming.type != OrderType::MARKET && incoming.price < ask_price) {
-                break;
-            }
-            for (const auto& order : entry.second) {
-                // Exclude self-trades when STP policy is active
-                if (stp_policy_ != STPPolicy::NONE && order.trader_id == trader) {
-                    continue;
-                }
+        for (const auto& level : asks_) {
+            if (incoming.type != OrderType::MARKET && incoming.price < level.price) break;
+            for (const auto& order : level.orders) {
                 available += order.remaining_quantity;
                 if (available >= needed) return true;
             }
         }
     } else {
-        for (const auto& entry : bids_) {
-            double bid_price = entry.first;
-            if (incoming.type != OrderType::MARKET && incoming.price > bid_price) {
-                break;
-            }
-            for (const auto& order : entry.second) {
-                // Exclude self-trades when STP policy is active
-                if (stp_policy_ != STPPolicy::NONE && order.trader_id == trader) {
-                    continue;
-                }
+        for (const auto& level : bids_) {
+            if (incoming.type != OrderType::MARKET && incoming.price > level.price) break;
+            for (const auto& order : level.orders) {
                 available += order.remaining_quantity;
                 if (available >= needed) return true;
             }
@@ -87,40 +102,25 @@ bool OrderBook::wouldSelfTrade(const Order& incoming) const {
     uint64_t trader = incoming.trader_id;
 
     if (incoming.side == OrderSide::BUY) {
-        for (const auto& entry : asks_) {
-            double ask_price = entry.first;
-            if (incoming.type != OrderType::MARKET && incoming.price < ask_price) {
-                break;
-            }
-            for (const auto& order : entry.second) {
-                // If we reach a same-trader order before our quantity is filled,
-                // then a self-trade would actually occur.
-                if (order.trader_id == trader && order.remaining_quantity > 0) {
-                    return true;
-                }
-                // Otherwise, consume this order's liquidity and continue.
+        for (const auto& level : asks_) {
+            if (incoming.type != OrderType::MARKET && incoming.price < level.price) break;
+            for (const auto& order : level.orders) {
+                if (order.remaining_quantity == 0) continue;
+                if (order.trader_id == trader) return true;
                 uint32_t consume = std::min(remaining, order.remaining_quantity);
                 remaining -= consume;
-                if (remaining == 0) {
-                    return false; // fully filled before reaching self
-                }
+                if (remaining == 0) return false;
             }
         }
     } else {
-        for (const auto& entry : bids_) {
-            double bid_price = entry.first;
-            if (incoming.type != OrderType::MARKET && incoming.price > bid_price) {
-                break;
-            }
-            for (const auto& order : entry.second) {
-                if (order.trader_id == trader && order.remaining_quantity > 0) {
-                    return true;
-                }
+        for (const auto& level : bids_) {
+            if (incoming.type != OrderType::MARKET && incoming.price > level.price) break;
+            for (const auto& order : level.orders) {
+                if (order.remaining_quantity == 0) continue;
+                if (order.trader_id == trader) return true;
                 uint32_t consume = std::min(remaining, order.remaining_quantity);
                 remaining -= consume;
-                if (remaining == 0) {
-                    return false;
-                }
+                if (remaining == 0) return false;
             }
         }
     }
@@ -130,14 +130,7 @@ bool OrderBook::wouldSelfTrade(const Order& incoming) const {
 std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
     std::vector<Trade> trades;
 
-    // FOK pre-check: if cannot fully fill, return empty
-    if (incoming.type == OrderType::FOK) {
-        if (!canFullyFill(incoming)) {
-            return trades;
-        }
-    }
-
-    // STP check — only when a policy is set
+    // STP handling first
     if (stp_policy_ != STPPolicy::NONE && wouldSelfTrade(incoming)) {
         switch (stp_policy_) {
             case STPPolicy::CANCEL_NEWEST:
@@ -145,52 +138,45 @@ std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
 
             case STPPolicy::CANCEL_OLDEST:
             case STPPolicy::CANCEL_BOTH: {
-                bool cancelled = false;
                 if (incoming.side == OrderSide::BUY) {
-                    for (auto it = asks_.begin(); it != asks_.end() && !cancelled; ) {
-                        double ask_price = it->first;
-                        if (incoming.type != OrderType::MARKET && incoming.price < ask_price) {
-                            break;
-                        }
-                        auto& orders = it->second;
-                        for (auto oit = orders.begin(); oit != orders.end(); ++oit) {
-                            if (oit->trader_id == incoming.trader_id && oit->remaining_quantity > 0) {
-                                orders.erase(oit);
-                                cancelled = true;
-                                break;
+                    for (size_t i = 0; i < asks_.size(); ) {
+                        if (incoming.type != OrderType::MARKET && incoming.price < asks_[i].price) break;
+                        auto& level = asks_[i];
+                        bool removed = false;
+                        for (auto it = level.orders.begin(); it != level.orders.end(); ) {
+                            if (it->trader_id == incoming.trader_id && it->remaining_quantity > 0) {
+                                it = level.orders.erase(it);
+                                removed = true;
+                                if (stp_policy_ == STPPolicy::CANCEL_OLDEST) break;
+                            } else {
+                                ++it;
                             }
                         }
-                        if (orders.empty()) {
-                            it = asks_.erase(it);
-                        } else {
-                            ++it;
-                        }
+                        if (level.orders.empty()) asks_.erase(asks_.begin() + i);
+                        else ++i;
+                        if (stp_policy_ == STPPolicy::CANCEL_OLDEST && removed) break;
                     }
                 } else {
-                    for (auto it = bids_.begin(); it != bids_.end() && !cancelled; ) {
-                        double bid_price = it->first;
-                        if (incoming.type != OrderType::MARKET && incoming.price > bid_price) {
-                            break;
-                        }
-                        auto& orders = it->second;
-                        for (auto oit = orders.begin(); oit != orders.end(); ++oit) {
-                            if (oit->trader_id == incoming.trader_id && oit->remaining_quantity > 0) {
-                                orders.erase(oit);
-                                cancelled = true;
-                                break;
+                    for (size_t i = 0; i < bids_.size(); ) {
+                        if (incoming.type != OrderType::MARKET && incoming.price > bids_[i].price) break;
+                        auto& level = bids_[i];
+                        bool removed = false;
+                        for (auto it = level.orders.begin(); it != level.orders.end(); ) {
+                            if (it->trader_id == incoming.trader_id && it->remaining_quantity > 0) {
+                                it = level.orders.erase(it);
+                                removed = true;
+                                if (stp_policy_ == STPPolicy::CANCEL_OLDEST) break;
+                            } else {
+                                ++it;
                             }
                         }
-                        if (orders.empty()) {
-                            it = bids_.erase(it);
-                        } else {
-                            ++it;
-                        }
+                        if (level.orders.empty()) bids_.erase(bids_.begin() + i);
+                        else ++i;
+                        if (stp_policy_ == STPPolicy::CANCEL_OLDEST && removed) break;
                     }
                 }
 
-                if (stp_policy_ == STPPolicy::CANCEL_BOTH) {
-                    return trades;
-                }
+                if (stp_policy_ == STPPolicy::CANCEL_BOTH) return trades;
                 break;
             }
 
@@ -199,81 +185,69 @@ std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
         }
     }
 
-    // === Matching loop ===
+    // FOK check AFTER STP
+    if (incoming.type == OrderType::FOK) {
+        if (!canFullyFill(incoming)) return trades;
+    }
+
+    // Matching loop
     if (incoming.side == OrderSide::BUY) {
         while (incoming.remaining_quantity > 0 && !asks_.empty()) {
-            auto bestAskIt = asks_.begin();
-            double bestAskPrice = bestAskIt->first;
+            PriceLevel& level = asks_.front();
+            if (incoming.type != OrderType::MARKET && incoming.price < level.price) break;
 
-            if (incoming.type != OrderType::MARKET && incoming.price < bestAskPrice) {
-                break;
+            // Skip cancelled orders (remaining_quantity == 0)
+            while (!level.orders.empty() && level.orders.front().remaining_quantity == 0) {
+                level.orders.pop_front();
             }
-
-            auto& askOrders = bestAskIt->second;
-            Order& sellOrder = askOrders.front();
-
-            // Guard: only skip same-trader when STP policy is active
-            if (stp_policy_ != STPPolicy::NONE && sellOrder.trader_id == incoming.trader_id) {
-                askOrders.erase(askOrders.begin());
-                if (askOrders.empty()) {
-                    asks_.erase(bestAskIt);
-                }
+            if (level.orders.empty()) {
+                asks_.erase(asks_.begin());
                 continue;
             }
 
+            Order& sellOrder = level.orders.front();
             uint32_t tradeQty = std::min(incoming.remaining_quantity, sellOrder.remaining_quantity);
             incoming.remaining_quantity -= tradeQty;
             sellOrder.remaining_quantity -= tradeQty;
 
             trades.emplace_back(next_trade_id_++, incoming.order_id, sellOrder.order_id,
                                 incoming.trader_id, sellOrder.trader_id,
-                                bestAskPrice, tradeQty);
+                                level.price, tradeQty);
 
             if (sellOrder.remaining_quantity == 0) {
-                askOrders.erase(askOrders.begin());
-                if (askOrders.empty()) {
-                    asks_.erase(bestAskIt);
-                }
+                level.orders.pop_front();
+                if (level.orders.empty()) asks_.erase(asks_.begin());
             }
         }
     } else {
         while (incoming.remaining_quantity > 0 && !bids_.empty()) {
-            auto bestBidIt = bids_.begin();
-            double bestBidPrice = bestBidIt->first;
+            PriceLevel& level = bids_.front();
+            if (incoming.type != OrderType::MARKET && incoming.price > level.price) break;
 
-            if (incoming.type != OrderType::MARKET && incoming.price > bestBidPrice) {
-                break;
+            while (!level.orders.empty() && level.orders.front().remaining_quantity == 0) {
+                level.orders.pop_front();
             }
-
-            auto& bidOrders = bestBidIt->second;
-            Order& buyOrder = bidOrders.front();
-
-            if (stp_policy_ != STPPolicy::NONE && buyOrder.trader_id == incoming.trader_id) {
-                bidOrders.erase(bidOrders.begin());
-                if (bidOrders.empty()) {
-                    bids_.erase(bestBidIt);
-                }
+            if (level.orders.empty()) {
+                bids_.erase(bids_.begin());
                 continue;
             }
 
+            Order& buyOrder = level.orders.front();
             uint32_t tradeQty = std::min(incoming.remaining_quantity, buyOrder.remaining_quantity);
             incoming.remaining_quantity -= tradeQty;
             buyOrder.remaining_quantity -= tradeQty;
 
             trades.emplace_back(next_trade_id_++, buyOrder.order_id, incoming.order_id,
                                 buyOrder.trader_id, incoming.trader_id,
-                                bestBidPrice, tradeQty);
+                                level.price, tradeQty);
 
             if (buyOrder.remaining_quantity == 0) {
-                bidOrders.erase(bidOrders.begin());
-                if (bidOrders.empty()) {
-                    bids_.erase(bestBidIt);
-                }
+                level.orders.pop_front();
+                if (level.orders.empty()) bids_.erase(bids_.begin());
             }
         }
     }
 
-    // Add remaining to book if applicable
     if (incoming.remaining_quantity > 0 &&
         incoming.type != OrderType::MARKET &&
         incoming.type != OrderType::IOC &&
@@ -286,30 +260,32 @@ std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
 
 double OrderBook::getBestBid() const {
     if (bids_.empty()) return 0;
-    return bids_.begin()->first;
+    return bids_.front().price;
 }
 
 double OrderBook::getBestAsk() const {
     if (asks_.empty()) return 0;
-    return asks_.begin()->first;
+    return asks_.front().price;
 }
 
 size_t OrderBook::getOrderCount() const {
     size_t count = 0;
-    for (const auto& entry : bids_) count += entry.second.size();
-    for (const auto& entry : asks_) count += entry.second.size();
+    for (const auto& level : bids_) count += level.orders.size();
+    for (const auto& level : asks_) count += level.orders.size();
     return count;
 }
 
 void OrderBook::printBook() const {
     std::cout << "\n=== ORDER BOOK ===\n";
     std::cout << "BIDS (Buy Orders):\n";
-    for (const auto& entry : bids_)
-        for (const auto& order : entry.second)
-            std::cout << "  " << order.to_string() << "\n";
+    for (const auto& level : bids_)
+        for (const auto& order : level.orders)
+            if (order.remaining_quantity > 0)
+                std::cout << "  " << order.to_string() << "\n";
     std::cout << "ASKS (Sell Orders):\n";
-    for (const auto& entry : asks_)
-        for (const auto& order : entry.second)
-            std::cout << "  " << order.to_string() << "\n";
+    for (const auto& level : asks_)
+        for (const auto& order : level.orders)
+            if (order.remaining_quantity > 0)
+                std::cout << "  " << order.to_string() << "\n";
     std::cout << "==================\n\n";
 }
