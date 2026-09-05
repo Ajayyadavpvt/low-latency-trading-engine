@@ -9,6 +9,7 @@
 #include "Order.h"
 #include "Trade.h"
 #include "OrderQueue.h"
+#include "OrderPool.h"
 
 enum class STPPolicy {
     NONE,
@@ -19,7 +20,11 @@ enum class STPPolicy {
 
 class OrderBook {
 public:
-    OrderBook();
+    explicit OrderBook(size_t pool_capacity = 50000);
+
+    OrderBook(const OrderBook&) = delete;
+    OrderBook& operator=(const OrderBook&) = delete;
+
     void addOrder(const Order& order);
     bool cancelOrder(uint64_t order_id);
     std::vector<Trade> matchOrder(Order& incoming);
@@ -33,22 +38,28 @@ public:
 private:
     struct PriceLevel {
         double price;
-        OrderQueue orders;  // vector-backed queue (O(1) pop_front)
+        OrderQueue orders;
+
+        PriceLevel(OrderPool* pool, double p)
+            : price(p), orders(pool) {}
+
+        PriceLevel(const PriceLevel&) = delete;
+        PriceLevel& operator=(const PriceLevel&) = delete;
+        PriceLevel(PriceLevel&&) noexcept = default;
+        PriceLevel& operator=(PriceLevel&&) noexcept = default;
     };
 
-    std::vector<PriceLevel> bids_;  // sorted descending
-    std::vector<PriceLevel> asks_;  // sorted ascending
+    std::vector<PriceLevel> bids_;
+    std::vector<PriceLevel> asks_;
 
     uint64_t next_trade_id_;
     STPPolicy stp_policy_;
+    OrderPool order_pool_;
 
     bool canFullyFill(const Order& incoming) const;
     bool wouldSelfTrade(const Order& incoming) const;
     size_t findBidLevel(double price) const;
     size_t findAskLevel(double price) const;
 };
-
-// NOTE: This class is NOT thread-safe. It must only be accessed from
-// a single thread (typically the consumer thread in ConcurrentMatchingEngine).
 
 #endif // ORDERBOOK_H

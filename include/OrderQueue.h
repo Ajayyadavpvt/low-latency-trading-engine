@@ -5,66 +5,124 @@
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+#include <utility>
+#include <stdexcept>
 #include <cassert>
 #include "Order.h"
+#include "OrderPool.h"
 
-// Vector-backed queue with lazy head index.
-// O(1) push_back (amortized), O(1) pop_front, O(1) front.
-// Contiguous memory, no per-chunk overhead. Capacity-triggered compaction.
+// Vector-backed queue backed by OrderPool.
+// Orders are allocated from a pre-allocated pool (no per-order dynamic allocation).
 class OrderQueue {
 public:
+    explicit OrderQueue(OrderPool* pool)
+        : pool_(pool)
+    {
+        if (!pool_) {
+            throw std::invalid_argument("OrderQueue: pool cannot be null");
+        }
+        pointers_.reserve(64);
+    }
+
+    // No copying — would lead to double ownership of pointers
+    OrderQueue(const OrderQueue&) = delete;
+    OrderQueue& operator=(const OrderQueue&) = delete;
+
+    // Move is safe
+    OrderQueue(OrderQueue&& other) noexcept
+        : pool_(other.pool_)
+        , pointers_(std::move(other.pointers_))
+        , head_(other.head_)
+        , tail_(other.tail_)
+    {
+        other.pool_ = nullptr;
+        other.head_ = other.tail_ = 0;
+    }
+
+    OrderQueue& operator=(OrderQueue&& other) noexcept {
+        if (this != &other) {
+            pool_ = other.pool_;
+            pointers_ = std::move(other.pointers_);
+            head_ = other.head_;
+            tail_ = other.tail_;
+            other.pool_ = nullptr;
+            other.head_ = other.tail_ = 0;
+        }
+        return *this;
+    }
+
     void push_back(const Order& order) {
-        if (tail_ == buffer_.size()) {
+        // Grow pointer array if needed
+        if (tail_ == pointers_.size()) {
             if (head_ > 0) {
-                // Reclaim dead space at front before growing
-                std::move(buffer_.begin() + head_, buffer_.begin() + tail_, buffer_.begin());
+                // Reclaim dead space at front
+                std::move(pointers_.begin() + head_, pointers_.begin() + tail_, pointers_.begin());
                 tail_ -= head_;
                 head_ = 0;
             }
-            if (tail_ == buffer_.size()) {
-                buffer_.resize(std::max<size_t>(buffer_.size() * 2, 16));
+            if (tail_ == pointers_.size()) {
+                pointers_.resize(std::max<size_t>(pointers_.size() * 2, 16), nullptr);
             }
         }
-        buffer_[tail_++] = order;
+
+        Order* ptr = pool_->allocate();
+        if (!ptr) {
+            throw std::runtime_error("OrderQueue: OrderPool exhausted");
+        }
+        *ptr = order;
+        pointers_[tail_++] = ptr;
     }
 
     Order& front() {
         assert(!empty() && "OrderQueue::front() on empty queue");
-        return buffer_[head_];
+        return *pointers_[head_];
     }
 
     const Order& front() const {
         assert(!empty() && "OrderQueue::front() on empty queue");
-        return buffer_[head_];
+        return *pointers_[head_];
     }
 
     void pop_front() {
-        if (empty()) return;  // safe no-op
+        if (empty()) return;
+        pool_->deallocate(pointers_[head_]);
+        pointers_[head_] = nullptr;
         ++head_;
-        if (head_ == tail_) head_ = tail_ = 0; // fully drained: O(1) reset
+        if (head_ == tail_) {
+            head_ = tail_ = 0;
+        }
     }
 
     bool empty() const { return head_ == tail_; }
     size_t size() const { return tail_ - head_; }
 
-    // Iterator support for scan/print
-    auto begin() { return buffer_.begin() + head_; }
-    auto end() { return buffer_.begin() + tail_; }
-    auto begin() const { return buffer_.begin() + head_; }
-    auto end() const { return buffer_.begin() + tail_; }
+    Order& at(size_t i) {
+        assert(head_ + i < tail_ && "OrderQueue::at() out of range");
+        return *pointers_[head_ + i];
+    }
 
-    // Real removal for cancelOrder
-    auto erase(typename std::vector<Order>::iterator it) {
-        assert(it >= buffer_.begin() + head_ && it < buffer_.begin() + tail_);
-        auto next = it;
-        std::move(it + 1, buffer_.begin() + tail_, it);
-        --tail_;
-        if (head_ == tail_) head_ = tail_ = 0; // reset if empty
-        return next;
+    const Order& at(size_t i) const {
+        assert(head_ + i < tail_ && "OrderQueue::at() out of range");
+        return *pointers_[head_ + i];
+    }
+
+    void erase_at(size_t i) {
+        assert(head_ + i < tail_ && "OrderQueue::erase_at() out of range");
+        pool_->deallocate(pointers_[head_ + i]);
+
+        for (size_t j = head_ + i + 1; j < tail_; ++j) {
+            pointers_[j - 1] = pointers_[j];
+        }
+        pointers_[--tail_] = nullptr;
+
+        if (head_ == tail_) {
+            head_ = tail_ = 0;
+        }
     }
 
 private:
-    std::vector<Order> buffer_;
+    OrderPool* pool_;
+    std::vector<Order*> pointers_;
     size_t head_ = 0;
     size_t tail_ = 0;
 };
