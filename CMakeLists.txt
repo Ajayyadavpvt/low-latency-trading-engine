@@ -77,3 +77,23 @@ target_link_libraries(run_tradelogger_tests PRIVATE
 target_compile_features(run_tradelogger_tests PRIVATE cxx_std_17)
 
 add_test(NAME tradelogger_tests COMMAND run_tradelogger_tests)
+
+find_package(Threads REQUIRED)
+
+add_executable(run_concurrent_determinism_tests
+    tests/test_concurrent_determinism.cpp
+    src/ConcurrentMatchingEngine.cpp
+    src/RingBuffer.cpp
+    src/OrderBook.cpp
+    src/MatchingEngine.cpp
+)
+
+target_link_libraries(run_concurrent_determinism_tests
+    PRIVATE
+    gtest_main
+    Threads::Threads
+)
+
+target_include_directories(run_concurrent_determinism_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME concurrent_determinism_tests COMMAND run_concurrent_determinism_tests)
