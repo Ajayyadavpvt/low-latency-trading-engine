@@ -61,6 +61,7 @@ add_executable(run_concurrent_tests
 
 target_link_libraries(run_concurrent_tests gtest_main)
 add_test(NAME concurrent_tests COMMAND run_concurrent_tests)
+
 # TradeLogger test executable
 find_package(Threads REQUIRED)
 
@@ -78,8 +79,7 @@ target_compile_features(run_tradelogger_tests PRIVATE cxx_std_17)
 
 add_test(NAME tradelogger_tests COMMAND run_tradelogger_tests)
 
-find_package(Threads REQUIRED)
-
+# Concurrent determinism test
 add_executable(run_concurrent_determinism_tests
     tests/test_concurrent_determinism.cpp
     src/ConcurrentMatchingEngine.cpp
@@ -88,8 +88,7 @@ add_executable(run_concurrent_determinism_tests
     src/MatchingEngine.cpp
 )
 
-target_link_libraries(run_concurrent_determinism_tests
-    PRIVATE
+target_link_libraries(run_concurrent_determinism_tests PRIVATE
     gtest_main
     Threads::Threads
 )
@@ -97,3 +96,26 @@ target_link_libraries(run_concurrent_determinism_tests
 target_include_directories(run_concurrent_determinism_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME concurrent_determinism_tests COMMAND run_concurrent_determinism_tests)
+
+# Symbol ID test
+add_executable(run_symbolid_tests
+    tests/test_symbolid.cpp
+)
+
+target_link_libraries(run_symbolid_tests gtest_main)
+add_test(NAME symbolid_tests COMMAND run_symbolid_tests)
+
+# Sharded engine test
+add_executable(run_sharded_tests
+    tests/test_sharded.cpp
+    src/ShardedEngine.cpp
+    src/ConcurrentMatchingEngine.cpp
+    src/RingBuffer.cpp
+    src/OrderBook.cpp
+    src/MatchingEngine.cpp
+)
+
+target_link_libraries(run_sharded_tests PRIVATE gtest_main Threads::Threads)
+target_include_directories(run_sharded_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME sharded_tests COMMAND run_sharded_tests)
