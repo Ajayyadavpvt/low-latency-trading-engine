@@ -20,7 +20,7 @@ enum class STPPolicy {
 
 class OrderBook {
 public:
-    explicit OrderBook(size_t pool_capacity = 50000);
+    explicit OrderBook(size_t pool_capacity = 2000000);
 
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;

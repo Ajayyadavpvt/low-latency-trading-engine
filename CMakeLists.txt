@@ -119,3 +119,19 @@ target_link_libraries(run_sharded_tests PRIVATE gtest_main Threads::Threads)
 target_include_directories(run_sharded_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 add_test(NAME sharded_tests COMMAND run_sharded_tests)
+
+# Stress tests
+add_executable(run_stress_tests
+    tests/test_stress.cpp
+    src/ShardedEngine.cpp
+    src/ConcurrentMatchingEngine.cpp
+    src/RingBuffer.cpp
+    src/OrderBook.cpp
+    src/MatchingEngine.cpp
+)
+
+target_link_libraries(run_stress_tests PRIVATE gtest_main Threads::Threads)
+target_include_directories(run_stress_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_test(NAME stress_tests COMMAND run_stress_tests)
+set_tests_properties(stress_tests PROPERTIES TIMEOUT 900)
