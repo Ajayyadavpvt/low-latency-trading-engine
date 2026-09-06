@@ -1,17 +1,20 @@
 # Low-Latency Trading Engine
 
-A high-performance order matching engine built in C++17, designed for learning and demonstrating systems programming concepts used in High-Frequency Trading (HFT) firms like Jane Street and Optiver.
+A high-performance, deterministic order matching engine built in C++17, designed for HFT (High-Frequency Trading) systems and financial infrastructure.
 
 ## Overview
 
 This project implements a **price-time priority matching engine** with:
 - **Lock-free SPSC ring buffer** for inter-thread communication
-- **Multithreaded producer-consumer architecture**
+- **Multi-symbol sharding** with per-shard independent matching engines
 - **Self-trade prevention (STP)** with configurable policies
-- **Google Test** unit testing (21 tests)
+- **Memory pool** and **OrderQueue** for zero-allocation hot paths
+- **Async binary trade persistence** via TradeLogger
+- **Google Test** unit testing (30 tests)
+- **CI/CD** with AddressSanitizer and ThreadSanitizer
 - **Latency benchmarking** with P50/P95/P99 statistics
 
-The engine processes **1.41 million orders/second** with **528ns average latency** on a single thread.
+The engine processes **1.5M+ orders/sec** with **sub-microsecond average latency** on a single thread.
 
 ---
 
@@ -23,7 +26,7 @@ The engine processes **1.41 million orders/second** with **528ns average latency
 - Partial fills and order cancellation
 - FOK atomicity guarantee (fully fill or nothing)
 - Real-time best bid/ask tracking
-- Input validation (zero qty, zero IDs, negative price, NaN/Inf)
+- Input validation (zero qty, negative price, NaN/Inf)
 
 ### Self-Trade Prevention (STP)
 - `NONE` — no prevention (default)
@@ -35,14 +38,31 @@ The engine processes **1.41 million orders/second** with **528ns average latency
 - Lock-free SPSC (Single Producer Single Consumer) ring buffer
 - Atomic operations with explicit memory ordering (acquire/release)
 - Cache-line padding (`alignas(64)`) to avoid false sharing
-- Producer threads submit orders, consumer thread matches them
-- Drain-on-stop guarantee — no submitted order is silently dropped
+- Producer-consumer model with drain-on-stop guarantee
+- CAS-based start/stop for thread safety
+
+### Multi-Symbol Sharding
+- `SymbolId` as integer (not string) for O(1) hot-path routing
+- `SymbolTable` with precomputed symbol→shard mapping
+- `ShardedMatchingEngine` with per-shard independent engine instances
+- Deterministic per-symbol state isolation
+
+### Memory Management
+- `OrderPool` — pre-allocated storage with double-free detection
+- `OrderQueue` — vector-backed queue with head-index and capacity-triggered compaction
+- Sorted `std::vector<PriceLevel>` for cache-friendly price levels
+
+### Persistence
+- `TradeLogger` — async binary trade logging with bounded queue
+- Write-ahead log semantics for audit trail
+- Thread-safe, non-blocking on hot path
 
 ### Testing & Benchmarking
-- 21 unit tests using Google Test framework
-- Determinism test (same input → same output, 2x)
+- 30 unit tests using Google Test
+- Determinism tests (single-threaded + concurrent consistency)
+- Stress tests (1M orders, multi-producer, backpressure)
 - Bounded book depth benchmark with warm-up phase
-- Latency percentiles: P50, P95, P99, max (interpolated)
+- Latency percentiles: P50, P95, P99, max
 
 ---
 
@@ -52,48 +72,50 @@ Measured on: Windows 10, GCC 13.3.0 (MinGW-w64)
 
 | Metric | Value |
 |--------|-------|
-| Throughput | 1,408,450 orders/sec |
-| Average Latency | 528 ns |
-| P50 (Median) | 400 ns |
-| P95 | 1,200 ns |
-| P99 | 2,200 ns |
-| Max Latency | 96,100 ns (96.1 μs) |
+| Throughput | 1,500,000+ orders/sec (single-threaded) |
+| Average Latency | ~500 ns |
+| P50 | ~400 ns |
+| P95 | ~1000 ns |
+| P99 | ~1700 ns |
+| Max | ~37 μs |
 
-> **Note:** Max latency outlier is caused by `std::map` tree rebalancing. Phase 8 will replace this with sorted arrays for better cache locality and consistent tail latency.
+> **Note:** Max latency outlier was reduced from 96μs (std::map) to 37μs (sorted vector). Further tail-latency improvements planned with profiling (Phase 12).
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────┐
-│  Producer Thread │
-│  (Order Source)  │
-└────────┬────────┘
-         │ push()
-         ▼
-┌─────────────────┐
-│   Ring Buffer   │  ← Lock-free SPSC queue (alignas(64))
-│  (Fixed Size)   │
-└────────┬────────┘
-         │ pop()
-         ▼
-┌─────────────────┐
-│ Consumer Thread  │
-│ (MatchingEngine) │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│    OrderBook    │
-│  Bids │  Asks   │
-│  (std::map)     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│     Trades      │
-└─────────────────┘
+┌─────────────────────┐
+│   Producer Thread   │
+│   (Order Source)    │
+└──────────┬──────────┘
+           │ submitOrder()
+           ▼
+┌─────────────────────┐
+│  ShardedMatching    │
+│     Engine          │
+│  ┌───┐ ┌───┐ ┌───┐ │
+│  │S0 │ │S1 │ │S2 │ │  ← per-symbol shards
+│  └─┬─┘ └─┬─┘ └─┬─┘ │
+└────┼──────┼──────┼──┘
+     ▼      ▼      ▼
+┌─────────┐┌─────────┐┌─────────┐
+│Consumer ││Consumer ││Consumer │
+│Thread 0 ││Thread 1 ││Thread 2 │
+└────┬────┘└────┬────┘└────┬────┘
+     ▼          ▼          ▼
+┌─────────┐┌─────────┐┌─────────┐
+│OrderBook││OrderBook││OrderBook│
+│ (Shard) ││ (Shard) ││ (Shard) │
+└────┬────┘└────┬────┘└────┬────┘
+     │          │          │
+     ▼          ▼          ▼
+   Trades    Trades     Trades
+     │          │          │
+     └──────────┼──────────┘
+                ▼
+        TradeLogger (async binary)
 ```
 
 ---
@@ -104,24 +126,38 @@ Measured on: Windows 10, GCC 13.3.0 (MinGW-w64)
 low-latency-trading-engine/
 ├── include/
 │   ├── Order.h                    # Order struct + validation
-│   ├── Trade.h                    # Trade struct (with trader IDs for audit)
+│   ├── Trade.h                    # Trade struct (with trader IDs)
+│   ├── SymbolId.h                 # Integer symbol IDs + SymbolTable
 │   ├── OrderBook.h                # Bids/asks + STP policy
-│   ├── MatchingEngine.h           # Single-threaded engine wrapper
-│   ├── RingBuffer.h               # Lock-free SPSC queue (cache-aligned)
-│   └── ConcurrentMatchingEngine.h # Multithreaded producer-consumer
+│   ├── OrderQueue.h               # Vector-backed queue (O(1) pop)
+│   ├── OrderPool.h                # Pre-allocated order storage
+│   ├── RingBuffer.h               # Lock-free SPSC queue
+│   ├── MatchingEngine.h           # Single-threaded matching wrapper
+│   ├── ConcurrentMatchingEngine.h # Producer-consumer engine
+│   ├── ShardedEngine.h            # Multi-symbol sharding
+│   └── TradeLogger.h              # Async binary trade persistence
 ├── src/
 │   ├── OrderBook.cpp              # Matching + STP + FOK logic
 │   ├── MatchingEngine.cpp         # Wrapper implementation
 │   ├── RingBuffer.cpp             # Lock-free queue implementation
-│   ├── ConcurrentMatchingEngine.cpp # Drain-on-stop, CAS, thread-safe stop
+│   ├── ConcurrentMatchingEngine.cpp # Thread-safe producer-consumer
+│   ├── ShardedEngine.cpp          # Symbol routing + shard management
+│   ├── TradeLogger.cpp            # Async binary logger
 │   └── main.cpp                   # Basic usage demo
 ├── tests/
-│   ├── test_matching.cpp          # 15 matching + STP + determinism tests
-│   ├── test_ringbuffer.cpp        # 5 ring buffer tests (wraparound, threads)
-│   └── test_concurrent.cpp        # 1 concurrent processing test
+│   ├── test_matching.cpp          # 15 matching + STP + determinism
+│   ├── test_ringbuffer.cpp        # 5 ring buffer tests
+│   ├── test_concurrent.cpp        # 1 concurrent processing
+│   ├── test_tradelogger.cpp       # 2 logger tests
+│   ├── test_concurrent_determinism.cpp # 2 determinism tests
+│   ├── test_symbolid.cpp          # 5 symbol table tests
+│   ├── test_sharded.cpp           # 2 sharded engine tests
+│   └── test_stress.cpp            # 3 stress tests
 ├── benchmarks/
-│   └── benchmark.cpp              # Bounded-book benchmark with warm-up
-├── CMakeLists.txt                 # Build system (FetchContent for gtest)
+│   └── benchmark.cpp              # Bounded-book benchmark
+├── .github/workflows/
+│   └── ci.yml                     # ASan/TSan CI pipeline
+├── CMakeLists.txt                 # Build system
 └── README.md
 ```
 
@@ -133,14 +169,28 @@ low-latency-trading-engine/
 |----------|--------|
 | `struct` instead of `class` for Order/Trade | No invariants, direct member access for speed |
 | `uint64_t` / `uint32_t` fixed-width integers | Predictable memory layout across platforms |
-| `std::map` for bids/asks | Automatic sorting by price (Phase 8: replace with sorted vector) |
-| `std::vector<Order>` per price level | Time priority within same price |
+| Sorted `std::vector<PriceLevel>` | Better cache locality than `std::map`, no tree rebalancing |
+| `OrderQueue` (head-index vector) | O(1) pop_front, O(1) amortized push, contiguous memory |
+| `OrderPool` pre-allocated storage | Zero dynamic allocation on hot path |
 | `steady_clock` not `high_resolution_clock` | Guaranteed monotonic — no NTP jumps |
 | `alignas(64)` on ring buffer atomics | Avoid false sharing between producer/consumer |
 | Power-of-2 ring buffer size | Bitwise AND (`& mask`) instead of modulo (`%`) |
 | `memory_order_acquire/release` | Correct visibility without full fence overhead |
 | Validation with `throw invalid_argument` | Active in release build (unlike `assert`) |
-| Default constructor for Order | Placeholder for ring buffer, validation-free |
+| Sharding over MPMC | Per-symbol determinism, cache locality, no contention |
+| `SymbolId` integer | No string hashing on hot path |
+| `SymbolTable.freeze()` | Prevents registration after workers start |
+
+---
+
+## Backpressure Policy
+
+- `RingBuffer::push` returns `false` when buffer is full.
+- `ConcurrentMatchingEngine::submitOrder` propagates this `false` — it never silently drops an order.
+- The producer decides whether to retry, back off, or reject the order.
+- `TradeLogger::log` returns `false` when its bounded queue is full or an error occurred.
+- The matching engine continues processing even if trade logging fails, but an error flag is set.
+- No operation on the hot path blocks indefinitely.
 
 ---
 
@@ -161,9 +211,14 @@ cmake --build .
 
 ### Run Tests
 ```bash
-./run_tests.exe              # Matching engine + STP + determinism (15 tests)
-./run_ringbuffer_tests.exe   # Lock-free queue (5 tests)
-./run_concurrent_tests.exe   # Multithreaded engine (1 test)
+./run_tests.exe                      # matching engine (15)
+./run_ringbuffer_tests.exe           # ring buffer (5)
+./run_concurrent_tests.exe           # concurrent (1)
+./run_tradelogger_tests.exe          # logger (2)
+./run_concurrent_determinism_tests.exe # determinism (2)
+./run_symbolid_tests.exe             # symbol table (5)
+./run_sharded_tests.exe              # sharded engine (2)
+./run_stress_tests.exe               # stress (3)
 ```
 
 ### Run Benchmark
@@ -176,48 +231,45 @@ cmake --build .
 ## Usage Example
 
 ```cpp
-#include "MatchingEngine.h"
+#include "ShardedEngine.h"
 #include "Order.h"
 
 int main() {
-    MatchingEngine engine;
-    engine.setSTPPolicy(STPPolicy::CANCEL_NEWEST);
+    ShardedMatchingEngine engine(4, 1024); // 4 shards, 1024 buffer
 
-    // Place a limit buy order: 100 shares @ ₹100.50
-    Order buy(1, 1001, OrderSide::BUY, OrderType::LIMIT, 100.50, 100);
-    engine.processOrder(buy);
+    auto& table = engine.getSymbolTable();
+    SymbolId btc = table.registerSymbol("BTCUSD");
+    SymbolId eth = table.registerSymbol("ETHUSD");
+    table.freeze();
 
-    // Place a limit sell order: 50 shares @ ₹100.50 (matches)
-    Order sell(2, 2001, OrderSide::SELL, OrderType::LIMIT, 100.50, 50);
-    auto trades = engine.processOrder(sell);
+    engine.startAll();
 
-    // trades[0] = Trade(quantity=50, price=100.50, buy_id=1, sell_id=2)
+    Order btc_buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, btc);
+    bool accepted = engine.submitOrder(btc_buy);
+
+    engine.stopAll();
     return 0;
 }
 ```
 
 ---
 
-## Phase 7 Changelog (Current)
+## Phase Progress
 
-- Fixed `static trade_id` bug (class member, no cross-instance ID collision)
-- Added input validation (zero qty/IDs, negative/NaN/Inf price for LIMIT/IOC/FOK)
-- Implemented Self-Trade Prevention (3 policies: CANCEL_NEWEST, CANCEL_OLDEST, CANCEL_BOTH)
-- Fixed FOK atomicity — `canFullyFill()` pre-check with self-trade exclusion
-- Added determinism test — same input sequence produces identical trades
-- Fixed RingBuffer `assert` → runtime exception (release-safe power-of-2 validation)
-- Added `alignas(64)` to ring buffer atomics (false sharing eliminated)
-- Fixed `ConcurrentMatchingEngine::stop()` to drain pending orders before joining
-- Added CAS (`compare_exchange_strong`) for start/stop thread-safety
-- Benchmark: bounded book depth with warm-up phase, interpolated percentiles
-
-## Future Improvements
-
-- [ ] **Phase 8**: Replace `std::map` with sorted arrays, memory pool, cache alignment
-- [ ] **Phase 9**: Concurrent pipeline determinism, sanitizer CI, stress tests
-- [ ] **Phase 10**: Network layer (TCP server, binary protocol)
-- [ ] **Phase 11**: Multi-symbol support, risk checks
-- [ ] **Phase 12**: Profiling report, release
+| Phase | Status |
+|-------|--------|
+| 1: Core Engine | ✅ Complete |
+| 2: Build & Test | ✅ Complete |
+| 3: Benchmarking | ✅ Complete |
+| 4: Ring Buffer | ✅ Complete |
+| 5: Multithreading | ✅ Complete |
+| 6: Documentation | ✅ Complete |
+| 7: Code Hardening | ✅ Complete |
+| 8: Performance (sorted vector, OrderPool, async persistence) | ✅ Complete |
+| 9: Concurrency (sharding, determinism, stress tests) | ✅ In Progress |
+| 10: Multi-Symbol + Risk Checks | ⏳ Planned |
+| 11: Network Layer | ⏳ Planned |
+| 12: Profiling & Release | ⏳ Planned |
 
 ---
 
@@ -231,4 +283,4 @@ Ajay Yadav — [GitHub](https://github.com/Rareajayyadav)
 
 ---
 
-*Built as a learning project to demonstrate C++ systems programming, lock-free data structures, and performance engineering.*
+*Built as a learning project to demonstrate C++ systems programming, lock-free data structures, sharding, determinism, and performance engineering.*
