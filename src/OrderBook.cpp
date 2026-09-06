@@ -1,13 +1,16 @@
 // src/OrderBook.cpp
-#include "../include/OrderBook.h"
+#include "OrderBook.h"
 #include <iostream>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 
 OrderBook::OrderBook(size_t pool_capacity)
     : next_trade_id_(1)
     , stp_policy_(STPPolicy::NONE)
     , order_pool_(pool_capacity)
-{}
+{
+}
 
 size_t OrderBook::findBidLevel(double price) const {
     size_t low = 0, high = bids_.size();
@@ -58,7 +61,9 @@ bool OrderBook::cancelOrder(uint64_t order_id) {
         for (size_t j = 0; j < level.orders.size(); ++j) {
             if (level.orders.at(j).order_id == order_id) {
                 level.orders.erase_at(j);
-                if (level.orders.empty()) bids_.erase(bids_.begin() + i);
+                if (level.orders.empty()) {
+                    bids_.erase(bids_.begin() + i);
+                }
                 return true;
             }
         }
@@ -68,7 +73,9 @@ bool OrderBook::cancelOrder(uint64_t order_id) {
         for (size_t j = 0; j < level.orders.size(); ++j) {
             if (level.orders.at(j).order_id == order_id) {
                 level.orders.erase_at(j);
-                if (level.orders.empty()) asks_.erase(asks_.begin() + i);
+                if (level.orders.empty()) {
+                    asks_.erase(asks_.begin() + i);
+                }
                 return true;
             }
         }
@@ -76,17 +83,115 @@ bool OrderBook::cancelOrder(uint64_t order_id) {
     return false;
 }
 
+// Replace an existing order: cancel old, then submit new through matchOrder.
+// If new_qty == 0, simply cancel the old order (success, no trades).
+ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint32_t new_qty) {
+    // Validate price BEFORE touching the original order.
+    if (new_qty > 0 && (!std::isfinite(new_price) || new_price <= 0.0)) {
+        return ReplaceResult{false, {}};
+    }
+
+    // Search bids
+    for (size_t i = 0; i < bids_.size(); ++i) {
+        auto& level = bids_[i];
+        for (size_t j = 0; j < level.orders.size(); ++j) {
+            const Order& old = level.orders.at(j);
+            if (old.order_id == order_id) {
+                uint32_t already_filled = old.quantity - old.remaining_quantity;
+                if (new_qty > 0 && new_qty < already_filled) {
+                    return ReplaceResult{false, {}}; // cannot shrink below filled qty
+                }
+
+                // Capture fields before erasing
+                uint64_t trader_id  = old.trader_id;
+                OrderSide side      = old.side;
+                OrderType type      = old.type;
+                SymbolId  symbol_id = old.symbol_id;
+                auto received_time  = old.received_time;
+
+                level.orders.erase_at(j);
+                if (level.orders.empty()) {
+                    bids_.erase(bids_.begin() + i);
+                }
+
+                if (new_qty == 0) {
+                    return ReplaceResult{true, {}}; // cancel only
+                }
+
+                Order new_order;
+                new_order.order_id           = order_id;
+                new_order.trader_id          = trader_id;
+                new_order.side               = side;
+                new_order.type               = type;
+                new_order.price              = new_price;
+                new_order.quantity           = new_qty;
+                new_order.remaining_quantity = new_qty;
+                new_order.symbol_id          = symbol_id;
+                new_order.timestamp          = std::chrono::steady_clock::now().time_since_epoch();
+                new_order.received_time      = received_time;
+
+                auto trades = matchOrder(new_order);
+                return ReplaceResult{true, std::move(trades)};
+            }
+        }
+    }
+
+    // Search asks
+    for (size_t i = 0; i < asks_.size(); ++i) {
+        auto& level = asks_[i];
+        for (size_t j = 0; j < level.orders.size(); ++j) {
+            const Order& old = level.orders.at(j);
+            if (old.order_id == order_id) {
+                uint32_t already_filled = old.quantity - old.remaining_quantity;
+                if (new_qty > 0 && new_qty < already_filled) {
+                    return ReplaceResult{false, {}};
+                }
+
+                uint64_t trader_id  = old.trader_id;
+                OrderSide side      = old.side;
+                OrderType type      = old.type;
+                SymbolId  symbol_id = old.symbol_id;
+                auto received_time  = old.received_time;
+
+                level.orders.erase_at(j);
+                if (level.orders.empty()) {
+                    asks_.erase(asks_.begin() + i);
+                }
+
+                if (new_qty == 0) {
+                    return ReplaceResult{true, {}};
+                }
+
+                Order new_order;
+                new_order.order_id           = order_id;
+                new_order.trader_id          = trader_id;
+                new_order.side               = side;
+                new_order.type               = type;
+                new_order.price              = new_price;
+                new_order.quantity           = new_qty;
+                new_order.remaining_quantity = new_qty;
+                new_order.symbol_id          = symbol_id;
+                new_order.timestamp          = std::chrono::steady_clock::now().time_since_epoch();
+                new_order.received_time      = received_time;
+
+                auto trades = matchOrder(new_order);
+                return ReplaceResult{true, std::move(trades)};
+            }
+        }
+    }
+
+    return ReplaceResult{false, {}}; // order not found
+}
+
 bool OrderBook::canFullyFill(const Order& incoming) const {
-    uint32_t needed = incoming.remaining_quantity;
-    uint32_t available = 0;
+    uint64_t needed = incoming.remaining_quantity;
+    uint64_t available = 0;
 
     if (incoming.side == OrderSide::BUY) {
         for (const auto& level : asks_) {
             if (incoming.type != OrderType::MARKET && incoming.price < level.price) break;
             for (size_t i = 0; i < level.orders.size(); ++i) {
-                const auto& order = level.orders.at(i);
-                if (order.remaining_quantity == 0) continue;
-                available += order.remaining_quantity;
+                available += level.orders.at(i).remaining_quantity;
                 if (available >= needed) return true;
             }
         }
@@ -94,9 +199,7 @@ bool OrderBook::canFullyFill(const Order& incoming) const {
         for (const auto& level : bids_) {
             if (incoming.type != OrderType::MARKET && incoming.price > level.price) break;
             for (size_t i = 0; i < level.orders.size(); ++i) {
-                const auto& order = level.orders.at(i);
-                if (order.remaining_quantity == 0) continue;
-                available += order.remaining_quantity;
+                available += level.orders.at(i).remaining_quantity;
                 if (available >= needed) return true;
             }
         }
@@ -139,18 +242,21 @@ bool OrderBook::wouldSelfTrade(const Order& incoming) const {
 std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
     std::vector<Trade> trades;
 
+    if (incoming.type == OrderType::FOK) {
+        if (!canFullyFill(incoming)) return trades;
+    }
+
     if (stp_policy_ != STPPolicy::NONE && wouldSelfTrade(incoming)) {
         switch (stp_policy_) {
             case STPPolicy::CANCEL_NEWEST:
                 return trades;
-
             case STPPolicy::CANCEL_OLDEST:
             case STPPolicy::CANCEL_BOTH: {
+                bool removed = false;
                 if (incoming.side == OrderSide::BUY) {
                     for (size_t i = 0; i < asks_.size(); ) {
                         if (incoming.type != OrderType::MARKET && incoming.price < asks_[i].price) break;
                         auto& level = asks_[i];
-                        bool removed = false;
                         for (size_t j = 0; j < level.orders.size(); ) {
                             if (level.orders.at(j).trader_id == incoming.trader_id &&
                                 level.orders.at(j).remaining_quantity > 0) {
@@ -169,7 +275,6 @@ std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
                     for (size_t i = 0; i < bids_.size(); ) {
                         if (incoming.type != OrderType::MARKET && incoming.price > bids_[i].price) break;
                         auto& level = bids_[i];
-                        bool removed = false;
                         for (size_t j = 0; j < level.orders.size(); ) {
                             if (level.orders.at(j).trader_id == incoming.trader_id &&
                                 level.orders.at(j).remaining_quantity > 0) {
@@ -185,17 +290,12 @@ std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
                         if (stp_policy_ == STPPolicy::CANCEL_OLDEST && removed) break;
                     }
                 }
-
                 if (stp_policy_ == STPPolicy::CANCEL_BOTH) return trades;
                 break;
             }
             default:
                 break;
         }
-    }
-
-    if (incoming.type == OrderType::FOK) {
-        if (!canFullyFill(incoming)) return trades;
     }
 
     if (incoming.side == OrderSide::BUY) {

@@ -18,6 +18,12 @@ enum class STPPolicy {
     CANCEL_BOTH
 };
 
+// Result returned by replaceOrder — success flag plus any trades generated.
+struct ReplaceResult {
+    bool success = false;
+    std::vector<Trade> trades;
+};
+
 class OrderBook {
 public:
     explicit OrderBook(size_t pool_capacity = 2000000);
@@ -27,6 +33,7 @@ public:
 
     void addOrder(const Order& order);
     bool cancelOrder(uint64_t order_id);
+    ReplaceResult replaceOrder(uint64_t order_id, double new_price, uint32_t new_qty);
     std::vector<Trade> matchOrder(Order& incoming);
     double getBestBid() const;
     double getBestAsk() const;

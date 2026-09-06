@@ -1,5 +1,5 @@
 // src/MatchingEngine.cpp
-#include "../include/MatchingEngine.h"
+#include "MatchingEngine.h"
 
 std::vector<Trade> MatchingEngine::processOrder(Order& order) {
     return book_.matchOrder(order);
@@ -7,6 +7,14 @@ std::vector<Trade> MatchingEngine::processOrder(Order& order) {
 
 bool MatchingEngine::cancelOrder(uint64_t order_id) {
     return book_.cancelOrder(order_id);
+}
+
+ReplaceResult MatchingEngine::replaceOrder(
+    uint64_t order_id,
+    double new_price,
+    uint32_t new_qty)
+{
+    return book_.replaceOrder(order_id, new_price, new_qty);
 }
 
 double MatchingEngine::getBestBid() const {

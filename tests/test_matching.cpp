@@ -1,6 +1,8 @@
 // tests/test_matching.cpp
 #include <gtest/gtest.h>
 #include <vector>
+#include <cmath>
+#include <stdexcept>
 #include "MatchingEngine.h"
 #include "Order.h"
 #include "Trade.h"
@@ -10,10 +12,10 @@ TEST(OrderBookTest, SimpleMatch) {
     MatchingEngine engine;
     Order buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(buy);
-    
+
     Order sell(2, 200, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
     auto trades = engine.processOrder(sell);
-    
+
     ASSERT_EQ(trades.size(), 1);
     EXPECT_EQ(trades[0].quantity, 10);
     EXPECT_DOUBLE_EQ(trades[0].price, 100.0);
@@ -27,10 +29,10 @@ TEST(OrderBookTest, PartialFill) {
     MatchingEngine engine;
     Order buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 100);
     engine.processOrder(buy);
-    
+
     Order sell(2, 200, OrderSide::SELL, OrderType::LIMIT, 100.0, 40);
     auto trades = engine.processOrder(sell);
-    
+
     ASSERT_EQ(trades.size(), 1);
     EXPECT_EQ(trades[0].quantity, 40);
     EXPECT_EQ(engine.getOrderCount(), 1);
@@ -42,13 +44,13 @@ TEST(OrderBookTest, PricePriority) {
     MatchingEngine engine;
     Order sell1(1, 100, OrderSide::SELL, OrderType::LIMIT, 101.0, 10);
     engine.processOrder(sell1);
-    
+
     Order sell2(2, 101, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(sell2);
-    
+
     Order buy(3, 300, OrderSide::BUY, OrderType::MARKET, 0, 10);
     auto trades = engine.processOrder(buy);
-    
+
     ASSERT_EQ(trades.size(), 1);
     EXPECT_DOUBLE_EQ(trades[0].price, 100.0);
     EXPECT_EQ(trades[0].sell_order_id, 2);
@@ -60,7 +62,7 @@ TEST(OrderBookTest, CancelOrder) {
     Order buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(buy);
     EXPECT_EQ(engine.getOrderCount(), 1);
-    
+
     bool result = engine.cancelOrder(1);
     EXPECT_TRUE(result);
     EXPECT_EQ(engine.getOrderCount(), 0);
@@ -71,13 +73,13 @@ TEST(OrderBookTest, MarketOrderMultipleLevels) {
     MatchingEngine engine;
     Order sell1(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 5);
     engine.processOrder(sell1);
-    
+
     Order sell2(2, 101, OrderSide::SELL, OrderType::LIMIT, 101.0, 5);
     engine.processOrder(sell2);
-    
+
     Order buy(3, 300, OrderSide::BUY, OrderType::MARKET, 0, 8);
     auto trades = engine.processOrder(buy);
-    
+
     ASSERT_EQ(trades.size(), 2);
     EXPECT_EQ(trades[0].quantity, 5);
     EXPECT_DOUBLE_EQ(trades[0].price, 100.0);
@@ -113,10 +115,10 @@ TEST(OrderBookTest, IOCNotAddedToBook) {
     MatchingEngine engine;
     Order sell(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(sell);
-    
+
     Order buy_ioc(2, 200, OrderSide::BUY, OrderType::IOC, 99.0, 5);
     auto trades = engine.processOrder(buy_ioc);
-    
+
     EXPECT_EQ(trades.size(), 0);
     EXPECT_EQ(engine.getOrderCount(), 1);
 }
@@ -126,10 +128,10 @@ TEST(OrderBookTest, FOKPartialFillCancelled) {
     MatchingEngine engine;
     Order sell(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 5);
     engine.processOrder(sell);
-    
+
     Order buy_fok(2, 200, OrderSide::BUY, OrderType::FOK, 100.0, 10);
     auto trades = engine.processOrder(buy_fok);
-    
+
     EXPECT_EQ(trades.size(), 0);
     EXPECT_EQ(engine.getOrderCount(), 1);
 }
@@ -198,7 +200,7 @@ TEST(OrderBookTest, FOKFillsAcrossLevels) {
     MatchingEngine engine;
     Order sell1(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 5);
     engine.processOrder(sell1);
-    
+
     Order sell2(2, 101, OrderSide::SELL, OrderType::LIMIT, 101.0, 5);
     engine.processOrder(sell2);
 
@@ -214,7 +216,7 @@ TEST(OrderBookTest, TimePriorityFIFO) {
     MatchingEngine engine;
     Order sell1(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(sell1);
-    
+
     Order sell2(2, 101, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(sell2);
 
@@ -230,25 +232,68 @@ TEST(OrderBookTest, NoSelfTradeFalsePositive) {
     MatchingEngine engine;
     engine.setSTPPolicy(STPPolicy::CANCEL_NEWEST);
 
-    // Other trader's order (front) — fills incoming first
     Order sell1(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 50);
     engine.processOrder(sell1);
 
-    // Same trader's own order (behind) — shouldn't matter for small incoming qty
     Order sell2(2, 200, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
     engine.processOrder(sell2);
 
-    // Same trader (200) BUY for only 10 — fills entirely against sell1
     Order buy(3, 200, OrderSide::BUY, OrderType::LIMIT, 100.0, 10);
     auto trades = engine.processOrder(buy);
 
     ASSERT_EQ(trades.size(), 1);
     EXPECT_EQ(trades[0].sell_order_id, 1);
     EXPECT_EQ(trades[0].quantity, 10);
-    EXPECT_EQ(engine.getOrderCount(), 2);  // sell1 partially filled (40), sell2 untouched (10)
+    EXPECT_EQ(engine.getOrderCount(), 2);
 }
 
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+// Test 16: Replace order with invalid price rejected
+TEST(OrderBookTest, ReplaceInvalidPriceRejected) {
+    MatchingEngine engine;
+    Order buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 99.0, 10);
+    engine.processOrder(buy);
+
+    auto result = engine.replaceOrder(1, std::nan(""), 5);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(engine.getOrderCount(), 1);
+}
+
+// Test 17: Replace with zero quantity cancels
+TEST(OrderBookTest, ReplaceZeroQuantityCancels) {
+    MatchingEngine engine;
+    Order buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 99.0, 10);
+    engine.processOrder(buy);
+
+    auto result = engine.replaceOrder(1, 100.0, 0);
+    EXPECT_TRUE(result.success);
+    EXPECT_TRUE(result.trades.empty());
+    EXPECT_EQ(engine.getOrderCount(), 0);
+}
+
+// Test 18: Replace crosses market and generates trade
+TEST(OrderBookTest, ReplacePriceChangeGeneratesTrade) {
+    MatchingEngine engine;
+    Order sell(1, 200, OrderSide::SELL, OrderType::LIMIT, 100.0, 10);
+    engine.processOrder(sell);
+
+    Order buy(2, 100, OrderSide::BUY, OrderType::LIMIT, 99.0, 10);
+    engine.processOrder(buy);
+
+    auto result = engine.replaceOrder(2, 101.0, 5);
+    EXPECT_TRUE(result.success);
+    ASSERT_EQ(result.trades.size(), 1);
+    EXPECT_EQ(result.trades[0].quantity, 5);
+    EXPECT_DOUBLE_EQ(result.trades[0].price, 100.0);
+    EXPECT_EQ(result.trades[0].buy_order_id, 2);
+    EXPECT_EQ(result.trades[0].sell_order_id, 1);
+    EXPECT_EQ(engine.getOrderCount(), 1);
+    EXPECT_DOUBLE_EQ(engine.getBestAsk(), 100.0);
+}
+
+// Test 19: Replace with non-existent order returns false
+TEST(OrderBookTest, ReplaceNonExistentOrder) {
+    MatchingEngine engine;
+    auto result = engine.replaceOrder(999, 100.0, 10);
+    EXPECT_FALSE(result.success);
+    EXPECT_TRUE(result.trades.empty());
 }
