@@ -5,6 +5,7 @@
 #include "OrderBook.h"
 #include "Order.h"
 #include "Trade.h"
+#include "MarketDataPublisher.h"
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -31,8 +32,14 @@ public:
     void setSTPPolicy(STPPolicy policy);
     STPPolicy getSTPPolicy() const;
 
+    // Market data publisher setter (optional)
+    void setMarketDataPublisher(MarketDataPublisher* publisher) {
+        publisher_ = publisher;
+    }
+
 private:
     OrderBook book_;
+    MarketDataPublisher* publisher_ = nullptr;
 };
 
 #endif // MATCHINGENGINE_H
