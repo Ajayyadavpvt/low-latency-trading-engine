@@ -11,6 +11,8 @@ jobs:
     name: AddressSanitizer Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
     steps:
     - uses: actions/checkout@v5
 
@@ -19,23 +21,25 @@ jobs:
         mkdir build-asan
         cd build-asan
         cmake -DCMAKE_BUILD_TYPE=Debug \
-              -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+              -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer -O1 -g" \
               -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address" ..
 
     - name: Build
       run: |
         cd build-asan
-        cmake --build .
+        cmake --build . --parallel $(nproc)
 
-    - name: Run tests
+    - name: Run tests (skip stress)
       run: |
         cd build-asan
-        ctest --output-on-failure
+        ctest --output-on-failure -E "stress"
 
   test-tsan:
     name: ThreadSanitizer Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TSAN_OPTIONS: halt_on_error=1:abort_on_error=1:history_size=7
     steps:
     - uses: actions/checkout@v5
 
@@ -45,15 +49,33 @@ jobs:
         cd build-tsan
         cmake -DCMAKE_CXX_COMPILER=clang++ \
               -DCMAKE_BUILD_TYPE=Debug \
-              -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+              -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1 -g" \
               -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" ..
 
     - name: Build
       run: |
         cd build-tsan
-        cmake --build .
+        cmake --build . --parallel $(nproc)
 
-    - name: Run tests
+    - name: Run tests (skip stress)
       run: |
         cd build-tsan
-        ctest --output-on-failure
+        ctest --output-on-failure -E "stress"
+
+  stress-tests:
+    name: Stress Tests (Release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Configure
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      run: cmake --build build --parallel $(nproc)
+
+    - name: Run stress tests
+      run: |
+        cd build
+        ctest -R stress_tests --output-on-failure

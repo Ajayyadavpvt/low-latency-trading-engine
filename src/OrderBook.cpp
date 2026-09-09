@@ -125,7 +125,7 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.type               = type;
                 new_order.price              = new_price;
                 new_order.quantity           = new_qty;
-                new_order.remaining_quantity = new_qty;
+                new_order.remaining_quantity = new_qty - already_filled;
                 new_order.symbol_id          = symbol_id;
                 new_order.timestamp          = std::chrono::steady_clock::now().time_since_epoch();
                 new_order.received_time      = received_time;
@@ -169,7 +169,7 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.type               = type;
                 new_order.price              = new_price;
                 new_order.quantity           = new_qty;
-                new_order.remaining_quantity = new_qty;
+                new_order.remaining_quantity = new_qty - already_filled;
                 new_order.symbol_id          = symbol_id;
                 new_order.timestamp          = std::chrono::steady_clock::now().time_since_epoch();
                 new_order.received_time      = received_time;

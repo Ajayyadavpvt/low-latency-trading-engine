@@ -4,6 +4,8 @@ project(LowLatencyTradingEngine)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(Threads REQUIRED)
+
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # Main executable
@@ -23,6 +25,7 @@ include(FetchContent)
 FetchContent_Declare(
     googletest
     URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(googletest)
 
@@ -66,8 +69,6 @@ target_link_libraries(run_concurrent_tests PRIVATE gtest_main Threads::Threads)
 add_test(NAME concurrent_tests COMMAND run_concurrent_tests)
 
 # TradeLogger test executable
-find_package(Threads REQUIRED)
-
 add_executable(run_tradelogger_tests
     tests/test_tradelogger.cpp
     src/TradeLogger.cpp
