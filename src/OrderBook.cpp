@@ -395,3 +395,66 @@ void OrderBook::printBook() const {
                 std::cout << "  " << level.orders.at(i).to_string() << "\n";
     std::cout << "==================\n\n";
 }
+
+bool OrderBook::getOrderById(uint64_t order_id, Order& out) const {
+    for (const auto& level : bids_) {
+        for (size_t i = 0; i < level.orders.size(); ++i) {
+            if (level.orders.at(i).order_id == order_id) {
+                out = level.orders.at(i);
+                return true;
+            }
+        }
+    }
+    for (const auto& level : asks_) {
+        for (size_t i = 0; i < level.orders.size(); ++i) {
+            if (level.orders.at(i).order_id == order_id) {
+                out = level.orders.at(i);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool OrderBook::applyFill(uint64_t order_id, uint32_t fill_qty) {
+    if (fill_qty == 0) return false;
+
+    // Search bids
+    for (size_t i = 0; i < bids_.size(); ++i) {
+        auto& level = bids_[i];
+        for (size_t j = 0; j < level.orders.size(); ++j) {
+            Order& order = level.orders.at(j);
+            if (order.order_id == order_id) {
+                if (order.remaining_quantity < fill_qty) return false;
+                order.remaining_quantity -= fill_qty;
+                if (order.remaining_quantity == 0) {
+                    level.orders.erase_at(j);
+                    if (level.orders.empty()) {
+                        bids_.erase(bids_.begin() + i);
+                    }
+                }
+                return true;
+            }
+        }
+    }
+
+    // Search asks
+    for (size_t i = 0; i < asks_.size(); ++i) {
+        auto& level = asks_[i];
+        for (size_t j = 0; j < level.orders.size(); ++j) {
+            Order& order = level.orders.at(j);
+            if (order.order_id == order_id) {
+                if (order.remaining_quantity < fill_qty) return false;
+                order.remaining_quantity -= fill_qty;
+                if (order.remaining_quantity == 0) {
+                    level.orders.erase_at(j);
+                    if (level.orders.empty()) {
+                        asks_.erase(asks_.begin() + i);
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}

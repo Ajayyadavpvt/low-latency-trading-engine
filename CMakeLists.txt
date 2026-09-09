@@ -150,3 +150,17 @@ target_link_libraries(run_marketdata_tests PRIVATE gtest_main Threads::Threads)
 target_include_directories(run_marketdata_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(run_marketdata_tests PRIVATE cxx_std_17)
 add_test(NAME marketdata_tests COMMAND run_marketdata_tests)
+
+# Journal/Recovery test
+add_executable(run_journal_tests
+    tests/test_journal.cpp
+    src/Journal.cpp
+    src/Recovery.cpp
+    src/MatchingEngine.cpp
+    src/OrderBook.cpp
+    src/MarketDataPublisher.cpp
+)
+target_link_libraries(run_journal_tests PRIVATE gtest_main Threads::Threads)
+target_include_directories(run_journal_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_features(run_journal_tests PRIVATE cxx_std_17)
+add_test(NAME journal_tests COMMAND run_journal_tests)

@@ -1,4 +1,3 @@
-// include/OrderBook.h
 #ifndef ORDERBOOK_H
 #define ORDERBOOK_H
 
@@ -35,6 +34,11 @@ public:
     bool cancelOrder(uint64_t order_id);
     ReplaceResult replaceOrder(uint64_t order_id, double new_price, uint32_t new_qty);
     std::vector<Trade> matchOrder(Order& incoming);
+
+    // Recovery helpers
+    bool getOrderById(uint64_t order_id, Order& out) const;
+    bool applyFill(uint64_t order_id, uint32_t fill_qty);
+
     double getBestBid() const;
     double getBestAsk() const;
     size_t getOrderCount() const;

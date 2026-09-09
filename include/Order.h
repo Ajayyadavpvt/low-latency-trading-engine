@@ -15,7 +15,7 @@ enum class OrderType { MARKET, LIMIT, IOC, FOK };
 struct Order {
     uint64_t order_id;
     uint64_t trader_id;
-    SymbolId symbol_id;   // NEW: which symbol this order belongs to
+    SymbolId symbol_id;
     OrderSide side;
     OrderType type;
     double price;
@@ -45,6 +45,12 @@ struct Order {
             if (p <= 0.0 || std::isnan(p) || std::isinf(p))
                 throw std::invalid_argument("Limit/IOC/FOK order price must be positive and finite");
         }
+    }
+
+    // Timestamp setter for recovery
+    void setTimestamp(std::chrono::nanoseconds ts) {
+        timestamp = ts;
+        received_time = ts;
     }
 
     bool is_filled() const { return remaining_quantity == 0; }

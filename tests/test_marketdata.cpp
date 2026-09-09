@@ -11,8 +11,10 @@ public:
 
 // Helper to create a simple event for testing
 MarketEvent makeTestEvent(EventType type) {
-    // For simplicity, return a TradeEvent with dummy data
-    return TradeEvent(0, 1, 2, 100, 200, 10, 12345, true);
+    // Return a TradeEvent with dummy data
+    // Constructor: (timestamp, sequence, restingOrderId, aggressorOrderId,
+    //               symbolId, traderId, tradeQuantity, tradePriceTicks, aggressorIsBuy)
+    return TradeEvent(0, 0, 1, 2, 100, 200, 10, 12345, true);
 }
 
 TEST(MarketDataPublisherTest, NoSubscribersDoesNothing) {
