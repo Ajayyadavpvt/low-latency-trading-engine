@@ -3,8 +3,8 @@
 #include "MarketDataTypes.h"
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -54,7 +54,8 @@ private:
     bool enqueue(JournalRecord&& record) noexcept;
     bool writeRecord(const JournalRecord& record);
     bool writeHeader();
-    bool waitUntilDrained();
+    bool openFile();
+    bool validateExistingHeader();
     bool waitUntilWritten(std::uint64_t target);
 
     std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
@@ -65,7 +66,7 @@ private:
     static void appendI64BE(std::vector<std::uint8_t>& out, std::int64_t value);
 
     std::string file_path_;
-    std::fstream file_;   // <-- Changed from ofstream to fstream
+    int fd_ = -1;   // raw POSIX file descriptor (no more std::fstream)
 
     std::atomic<bool> running_{false};
     std::atomic<bool> healthy_{true};
@@ -79,7 +80,6 @@ private:
     std::mutex file_mutex_;
     std::thread writer_thread_;
 
-    bool drain_requested_{false};
     std::uint64_t queued_records_{0};
     std::uint64_t written_records_{0};
 };

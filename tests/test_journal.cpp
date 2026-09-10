@@ -7,6 +7,7 @@
 #include <thread>
 #include <chrono>
 #include <cstdio>
+#include <fstream>      // <-- ADDED THIS
 
 class JournalTest : public ::testing::Test {
 protected:
@@ -140,7 +141,6 @@ TEST_F(JournalTest, RecoveryDoesNotPublishEvents) {
     }
 
     // Phase 2: Recover into a new engine that has its own publisher
-    // If recovery incorrectly publishes events, this subscriber will count them.
     MarketDataPublisher recovery_pub;
     CountingSubscriber counter;
     recovery_pub.subscribe(&counter);

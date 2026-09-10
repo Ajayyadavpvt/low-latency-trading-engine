@@ -1,15 +1,78 @@
 #include "Journal.h"
-#include <chrono>
 #include <cstring>
 #include <stdexcept>
 
-#ifdef __linux__
-#include <fcntl.h>
-#include <unistd.h>
-#include <ext/stdio_filebuf.h>
+#ifdef _WIN32
+    #include <io.h>
+    #include <fcntl.h>
+    #include <sys/stat.h>
+    #define JOURNAL_OPEN_FLAGS (O_RDWR | O_CREAT | O_BINARY)
+    #define JOURNAL_OPEN_MODE  (_S_IREAD | _S_IWRITE)
+
+    static int j_open(const char* path, int flags, int mode) {
+        return _open(path, flags, mode);
+    }
+    static int j_close(int fd) { return _close(fd); }
+    static long long j_lseek(int fd, long long off, int whence) {
+        return _lseeki64(fd, off, whence);
+    }
+    static int j_read(int fd, void* buf, std::size_t count) {
+        return _read(fd, buf, static_cast<unsigned int>(count));
+    }
+    static int j_write(int fd, const void* buf, std::size_t count) {
+        return _write(fd, buf, static_cast<unsigned int>(count));
+    }
+    static int j_sync(int fd) { return _commit(fd); }
+#else
+    #include <fcntl.h>
+    #include <unistd.h>
+    #define JOURNAL_OPEN_FLAGS (O_RDWR | O_CREAT)
+    #define JOURNAL_OPEN_MODE  (0644)
+
+    static int j_open(const char* path, int flags, int mode) {
+        return ::open(path, flags, mode);
+    }
+    static int j_close(int fd) { return ::close(fd); }
+    static long long j_lseek(int fd, long long off, int whence) {
+        return static_cast<long long>(::lseek(fd, off, whence));
+    }
+    static int j_read(int fd, void* buf, std::size_t count) {
+        return static_cast<int>(::read(fd, buf, count));
+    }
+    static int j_write(int fd, const void* buf, std::size_t count) {
+        return static_cast<int>(::write(fd, buf, count));
+    }
+    static int j_sync(int fd) { return ::fdatasync(fd); }
 #endif
 
 namespace {
+
+// Cross-platform helper: write all bytes or fail
+bool writeAll(int fd, const void* data, std::size_t size) {
+    const std::uint8_t* p = static_cast<const std::uint8_t*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+        int n = j_write(fd, p, remaining);
+        if (n <= 0) return false;
+        p += n;
+        remaining -= static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+// Cross-platform helper: read all bytes or fail
+bool readAll(int fd, void* data, std::size_t size) {
+    std::uint8_t* p = static_cast<std::uint8_t*>(data);
+    std::size_t remaining = size;
+    while (remaining > 0) {
+        int n = j_read(fd, p, remaining);
+        if (n <= 0) return false;
+        p += n;
+        remaining -= static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
 std::uint32_t crc_table[256];
 std::once_flag crc_once;
 void initializeCRC32() {
@@ -24,7 +87,8 @@ void initializeCRC32() {
         }
     });
 }
-}
+
+} // namespace
 
 std::uint32_t Journal::crc32(const std::uint8_t* data, std::size_t size) noexcept {
     initializeCRC32();
@@ -50,33 +114,69 @@ void Journal::appendI64BE(std::vector<std::uint8_t>& out, std::int64_t v) {
 
 Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
     : file_path_(file_path), queue_capacity_(queue_capacity) {
-    if (queue_capacity_ == 0) throw std::invalid_argument("queue capacity must be > 0");
-    file_.open(file_path_, std::ios::binary | std::ios::in | std::ios::out | std::ios::app);
-    if (!file_) {
+    if (queue_capacity_ == 0) {
+        throw std::invalid_argument("Journal: queue capacity must be > 0");
+    }
+
+    // Open with O_RDWR so we can both validate header (read) and append (write)
+    fd_ = j_open(file_path_.c_str(), JOURNAL_OPEN_FLAGS, JOURNAL_OPEN_MODE);
+    if (fd_ < 0) {
         healthy_.store(false, std::memory_order_release);
         throw std::runtime_error("Journal: cannot open file: " + file_path_);
     }
 
-    // Header validation for existing file
-    file_.seekg(0, std::ios::end);
-    std::streamoff file_size = file_.tellg();
+    // Determine current file size
+    long long file_size = j_lseek(fd_, 0, SEEK_END);
+    if (file_size < 0) {
+        j_close(fd_);
+        fd_ = -1;
+        healthy_.store(false, std::memory_order_release);
+        throw std::runtime_error("Journal: seek end failed");
+    }
+
+    // Validate existing header if file non-empty
     if (file_size > 0) {
-        file_.seekg(0, std::ios::beg);
+        if (file_size < 5) {
+            j_close(fd_);
+            fd_ = -1;
+            healthy_.store(false, std::memory_order_release);
+            throw std::runtime_error("Journal: truncated header");
+        }
+        if (j_lseek(fd_, 0, SEEK_SET) < 0) {
+            j_close(fd_);
+            fd_ = -1;
+            healthy_.store(false, std::memory_order_release);
+            throw std::runtime_error("Journal: seek start failed");
+        }
         char magic[4];
-        std::uint8_t version;
-        file_.read(magic, 4);
-        file_.read(reinterpret_cast<char*>(&version), 1);
+        std::uint8_t version = 0;
+        if (!readAll(fd_, magic, 4) || !readAll(fd_, &version, 1)) {
+            j_close(fd_);
+            fd_ = -1;
+            healthy_.store(false, std::memory_order_release);
+            throw std::runtime_error("Journal: cannot read header");
+        }
         if (std::memcmp(magic, kMagic, 4) != 0 || version != kVersion) {
-            file_.close();
+            j_close(fd_);
+            fd_ = -1;
             healthy_.store(false, std::memory_order_release);
             throw std::runtime_error("Journal: incompatible or corrupt header");
         }
-        file_.clear();
     }
 
-    file_.seekp(0, std::ios::end);
+    // Move to end for appending
+    if (j_lseek(fd_, 0, SEEK_END) < 0) {
+        j_close(fd_);
+        fd_ = -1;
+        healthy_.store(false, std::memory_order_release);
+        throw std::runtime_error("Journal: seek end failed");
+    }
+
+    // If file was empty, write header
     if (file_size == 0) {
         if (!writeHeader()) {
+            j_close(fd_);
+            fd_ = -1;
             healthy_.store(false, std::memory_order_release);
             throw std::runtime_error("Journal: failed to write header");
         }
@@ -93,19 +193,26 @@ Journal::~Journal() {
     }
     queue_cv_.notify_all();
     if (writer_thread_.joinable()) writer_thread_.join();
+
+    // Final flush and sync
     flush();
-    std::lock_guard<std::mutex> file_lock(file_mutex_);
-    if (file_.is_open()) { file_.flush(); file_.close(); }
+
+    std::lock_guard<std::mutex> lock(file_mutex_);
+    if (fd_ >= 0) {
+        j_sync(fd_);
+        j_close(fd_);
+        fd_ = -1;
+    }
 }
 
 bool Journal::writeHeader() {
     std::lock_guard<std::mutex> lock(file_mutex_);
-    if (!file_) return false;
-    file_.write(kMagic, 4);
-    std::uint8_t version = kVersion;
-    file_.write(reinterpret_cast<const char*>(&version), 1);
-    file_.flush();
-    return static_cast<bool>(file_);
+    if (fd_ < 0) return false;
+
+    std::uint8_t buf[5];
+    std::memcpy(buf, kMagic, 4);
+    buf[4] = kVersion;
+    return writeAll(fd_, buf, sizeof(buf));
 }
 
 bool Journal::enqueue(JournalRecord&& record) noexcept {
@@ -136,16 +243,17 @@ bool Journal::writeRecord(const JournalRecord& record) {
     appendU64BE(body, record.sequence);
     appendU8(body, static_cast<std::uint8_t>(record.command));
     body.insert(body.end(), record.payload.begin(), record.payload.end());
+
     std::uint32_t checksum = crc32(body.data(), body.size());
     std::vector<std::uint8_t> crc_bytes;
     crc_bytes.reserve(4);
     appendU32BE(crc_bytes, checksum);
 
     std::lock_guard<std::mutex> lock(file_mutex_);
-    if (!file_) return false;
-    file_.write(reinterpret_cast<const char*>(body.data()), body.size());
-    file_.write(reinterpret_cast<const char*>(crc_bytes.data()), crc_bytes.size());
-    return static_cast<bool>(file_);
+    if (fd_ < 0) return false;
+    if (!writeAll(fd_, body.data(), body.size())) return false;
+    if (!writeAll(fd_, crc_bytes.data(), crc_bytes.size())) return false;
+    return true;
 }
 
 void Journal::writerThread() {
@@ -170,19 +278,16 @@ void Journal::writerThread() {
 
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
-
-            ++written_records_;
-
             if (ok) {
+                ++written_records_;
                 last_written_sequence_.store(record.sequence, std::memory_order_release);
             } else {
                 healthy_.store(false, std::memory_order_release);
                 running_.store(false, std::memory_order_release);
             }
-
-            if (queue_.empty() && written_records_ >= queued_records_) {
-                drained_cv_.notify_all();
-            }
+            // FIX: Notify after EVERY write, not just when queue fully drained.
+            // This prevents flush() from blocking indefinitely under continuous load.
+            drained_cv_.notify_all();
         }
 
         if (!ok) {
@@ -194,46 +299,28 @@ void Journal::writerThread() {
 
 bool Journal::waitUntilWritten(std::uint64_t target) {
     std::unique_lock<std::mutex> lock(queue_mutex_);
-
     drained_cv_.wait(lock, [this, target] {
         return written_records_ >= target ||
                !healthy_.load(std::memory_order_acquire);
     });
-
-    return healthy_.load(std::memory_order_acquire);
-}
-
-bool Journal::waitUntilDrained() {
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-
-    drained_cv_.wait(lock, [this] {
-        return queue_.empty() && written_records_ >= queued_records_;
-    });
-
     return healthy_.load(std::memory_order_acquire);
 }
 
 bool Journal::flush() {
+    // Snapshot target: number of records enqueued up to this instant
     std::uint64_t target;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         target = queued_records_;
     }
 
+    // Wait until writer has processed all records up to that target
     if (!waitUntilWritten(target)) {
         return false;
     }
 
-    std::lock_guard<std::mutex> file_lock(file_mutex_);
-    if (!file_) return false;
-
-    file_.flush();
-    if (!file_) {
-        healthy_.store(false, std::memory_order_release);
-        return false;
-    }
-
-    return true;
+    // Data is written directly to fd (no user-space buffering to flush)
+    return healthy_.load(std::memory_order_acquire);
 }
 
 bool Journal::sync() {
@@ -241,23 +328,14 @@ bool Journal::sync() {
         return false;
     }
 
-#ifdef __linux__
-    std::lock_guard<std::mutex> file_lock(file_mutex_);
-    auto* fb = static_cast<__gnu_cxx::stdio_filebuf<char>*>(file_.rdbuf());
-    int fd = fb ? fb->fd() : -1;
-    if (fd >= 0) {
-        if (::fdatasync(fd) != 0) {
-            healthy_.store(false, std::memory_order_release);
-            return false;
-        }
-        return true;
-    } else {
+    std::lock_guard<std::mutex> lock(file_mutex_);
+    if (fd_ < 0) return false;
+
+    if (j_sync(fd_) != 0) {
+        healthy_.store(false, std::memory_order_release);
         return false;
     }
-#else
-    // On non-Linux, fallback to flush (no durability guarantee)
     return true;
-#endif
 }
 
 void Journal::onEvent(const MarketEvent& event) noexcept {
