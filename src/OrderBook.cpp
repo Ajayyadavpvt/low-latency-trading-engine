@@ -131,7 +131,8 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.received_time      = received_time;
 
                 auto trades = matchOrder(new_order);
-                return ReplaceResult{true, std::move(trades)};
+                std::uint32_t final_remaining = new_order.remaining_quantity;   // <-- ADD
+                return ReplaceResult{true, std::move(trades), final_remaining}; // <-- MODIFY
             }
         }
     }
@@ -175,7 +176,8 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.received_time      = received_time;
 
                 auto trades = matchOrder(new_order);
-                return ReplaceResult{true, std::move(trades)};
+                std::uint32_t final_remaining = new_order.remaining_quantity;   // <-- ADD
+                return ReplaceResult{true, std::move(trades), final_remaining}; // <-- MODIFY
             }
         }
     }

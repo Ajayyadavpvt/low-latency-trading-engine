@@ -21,6 +21,7 @@ enum class STPPolicy {
 struct ReplaceResult {
     bool success = false;
     std::vector<Trade> trades;
+    std::uint32_t final_remaining_quantity = 0;   // <-- ADD THIS
 };
 
 class OrderBook {

@@ -37,13 +37,16 @@ public:
     void onEvent(const MarketEvent& event) noexcept override;
 
     bool flush();
+    bool sync();
+
     bool isHealthy() const noexcept { return healthy_.load(std::memory_order_acquire); }
     std::uint64_t lastWrittenSequence() const noexcept {
         return last_written_sequence_.load(std::memory_order_acquire);
     }
 
 private:
-    static constexpr std::uint32_t kMagic = 0x314C4E4A; // "JNL1"
+    // Magic bytes for journal header (JNL2)
+    static constexpr char kMagic[4] = {'J', 'N', 'L', '2'};
     static constexpr std::uint8_t kVersion = 2;
     static constexpr std::size_t kMaxPayloadSize = 1024;
 
@@ -52,6 +55,8 @@ private:
     bool writeRecord(const JournalRecord& record);
     bool writeHeader();
     bool waitUntilDrained();
+    bool waitUntilWritten(std::uint64_t target);
+
     std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
 
     static void appendU8(std::vector<std::uint8_t>& out, std::uint8_t value);
@@ -60,7 +65,8 @@ private:
     static void appendI64BE(std::vector<std::uint8_t>& out, std::int64_t value);
 
     std::string file_path_;
-    std::ofstream file_;
+    std::fstream file_;   // <-- Changed from ofstream to fstream
+
     std::atomic<bool> running_{false};
     std::atomic<bool> healthy_{true};
     std::atomic<std::uint64_t> last_written_sequence_{0};

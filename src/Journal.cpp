@@ -6,6 +6,7 @@
 #ifdef __linux__
 #include <fcntl.h>
 #include <unistd.h>
+#include <ext/stdio_filebuf.h>
 #endif
 
 namespace {
@@ -55,13 +56,32 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         healthy_.store(false, std::memory_order_release);
         throw std::runtime_error("Journal: cannot open file: " + file_path_);
     }
+
+    // Header validation for existing file
+    file_.seekg(0, std::ios::end);
+    std::streamoff file_size = file_.tellg();
+    if (file_size > 0) {
+        file_.seekg(0, std::ios::beg);
+        char magic[4];
+        std::uint8_t version;
+        file_.read(magic, 4);
+        file_.read(reinterpret_cast<char*>(&version), 1);
+        if (std::memcmp(magic, kMagic, 4) != 0 || version != kVersion) {
+            file_.close();
+            healthy_.store(false, std::memory_order_release);
+            throw std::runtime_error("Journal: incompatible or corrupt header");
+        }
+        file_.clear();
+    }
+
     file_.seekp(0, std::ios::end);
-    if (file_.tellp() == std::streampos(0)) {
+    if (file_size == 0) {
         if (!writeHeader()) {
             healthy_.store(false, std::memory_order_release);
             throw std::runtime_error("Journal: failed to write header");
         }
     }
+
     running_.store(true, std::memory_order_release);
     writer_thread_ = std::thread(&Journal::writerThread, this);
 }
@@ -81,9 +101,8 @@ Journal::~Journal() {
 bool Journal::writeHeader() {
     std::lock_guard<std::mutex> lock(file_mutex_);
     if (!file_) return false;
-    char magic[4] = {'J', 'N', 'L', '2'};
+    file_.write(kMagic, 4);
     std::uint8_t version = kVersion;
-    file_.write(magic, 4);
     file_.write(reinterpret_cast<const char*>(&version), 1);
     file_.flush();
     return static_cast<bool>(file_);
@@ -132,39 +151,113 @@ bool Journal::writeRecord(const JournalRecord& record) {
 void Journal::writerThread() {
     while (true) {
         JournalRecord record;
+
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_cv_.wait(lock, [this] { return !queue_.empty() || !running_.load(std::memory_order_acquire); });
-            if (queue_.empty() && !running_.load(std::memory_order_acquire)) break;
+            queue_cv_.wait(lock, [this] {
+                return !queue_.empty() || !running_.load(std::memory_order_acquire);
+            });
+
+            if (queue_.empty() && !running_.load(std::memory_order_acquire)) {
+                break;
+            }
+
             record = std::move(queue_.front());
             queue_.pop_front();
         }
-        if (!writeRecord(record)) {
-            healthy_.store(false, std::memory_order_release);
-            continue;
-        }
-        last_written_sequence_.store(record.sequence, std::memory_order_release);
+
+        const bool ok = writeRecord(record);
+
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
+
             ++written_records_;
-            if (queue_.empty()) drained_cv_.notify_all();
+
+            if (ok) {
+                last_written_sequence_.store(record.sequence, std::memory_order_release);
+            } else {
+                healthy_.store(false, std::memory_order_release);
+                running_.store(false, std::memory_order_release);
+            }
+
+            if (queue_.empty() && written_records_ >= queued_records_) {
+                drained_cv_.notify_all();
+            }
+        }
+
+        if (!ok) {
+            queue_cv_.notify_all();
+            break;
         }
     }
 }
 
+bool Journal::waitUntilWritten(std::uint64_t target) {
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+
+    drained_cv_.wait(lock, [this, target] {
+        return written_records_ >= target ||
+               !healthy_.load(std::memory_order_acquire);
+    });
+
+    return healthy_.load(std::memory_order_acquire);
+}
+
 bool Journal::waitUntilDrained() {
     std::unique_lock<std::mutex> lock(queue_mutex_);
-    drained_cv_.wait(lock, [this] { return queue_.empty(); });
-    return true;
+
+    drained_cv_.wait(lock, [this] {
+        return queue_.empty() && written_records_ >= queued_records_;
+    });
+
+    return healthy_.load(std::memory_order_acquire);
 }
 
 bool Journal::flush() {
-    if (!waitUntilDrained()) return false;
-    std::lock_guard<std::mutex> lock(file_mutex_);
+    std::uint64_t target;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        target = queued_records_;
+    }
+
+    if (!waitUntilWritten(target)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> file_lock(file_mutex_);
     if (!file_) return false;
+
     file_.flush();
-    if (!file_) { healthy_.store(false, std::memory_order_release); return false; }
+    if (!file_) {
+        healthy_.store(false, std::memory_order_release);
+        return false;
+    }
+
     return true;
+}
+
+bool Journal::sync() {
+    if (!flush()) {
+        return false;
+    }
+
+#ifdef __linux__
+    std::lock_guard<std::mutex> file_lock(file_mutex_);
+    auto* fb = static_cast<__gnu_cxx::stdio_filebuf<char>*>(file_.rdbuf());
+    int fd = fb ? fb->fd() : -1;
+    if (fd >= 0) {
+        if (::fdatasync(fd) != 0) {
+            healthy_.store(false, std::memory_order_release);
+            return false;
+        }
+        return true;
+    } else {
+        return false;
+    }
+#else
+    // On non-Linux, fallback to flush (no durability guarantee)
+    return true;
+#endif
 }
 
 void Journal::onEvent(const MarketEvent& event) noexcept {

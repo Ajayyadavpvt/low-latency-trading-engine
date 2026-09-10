@@ -103,3 +103,57 @@ TEST_F(JournalTest, EmptyJournal) {
     EXPECT_TRUE(recovery.replay(engine));
     EXPECT_EQ(recovery.recordsReplayed(), 0u);
 }
+
+// -----------------------------------------------------------------------------
+// Recovery Isolation Test
+// Verify that during recovery no new events are emitted to a publisher.
+// -----------------------------------------------------------------------------
+class CountingSubscriber : public MarketDataSubscriber {
+public:
+    void onEvent(const MarketEvent&) noexcept override {
+        ++count_;
+    }
+    int count() const { return count_; }
+private:
+    int count_ = 0;
+};
+
+TEST_F(JournalTest, RecoveryDoesNotPublishEvents) {
+    // Phase 1: Create journal with some orders and cancel
+    {
+        MarketDataPublisher pub;
+        Journal journal(file_path_, 1024);
+        pub.subscribe(&journal);
+
+        MatchingEngine engine;
+        engine.setMarketDataPublisher(&pub);
+        std::atomic<uint64_t> seq{0};
+        engine.setSequenceCounter(&seq);
+
+        Order buy(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+        engine.processOrder(buy);
+        Order sell(2, 200, OrderSide::SELL, OrderType::LIMIT, 101.0, 5, 1);
+        engine.processOrder(sell);
+        engine.cancelOrder(1);
+
+        journal.flush();
+    }
+
+    // Phase 2: Recover into a new engine that has its own publisher
+    // If recovery incorrectly publishes events, this subscriber will count them.
+    MarketDataPublisher recovery_pub;
+    CountingSubscriber counter;
+    recovery_pub.subscribe(&counter);
+
+    MatchingEngine recovered;
+    recovered.setMarketDataPublisher(&recovery_pub);
+    std::atomic<uint64_t> seq2{0};
+    recovered.setSequenceCounter(&seq2);
+
+    Recovery recovery(file_path_);
+    ASSERT_TRUE(recovery.replay(recovered));
+
+    // Recovery should NOT have published any events
+    EXPECT_EQ(counter.count(), 0)
+        << "Recovery published events! It must be side-effect free.";
+}

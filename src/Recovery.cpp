@@ -122,14 +122,14 @@ bool Recovery::processRecord(MatchingEngine& engine, const Record& record) {
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::CANCEL_ORDER)) {
         if (record.payload.size() != 16) return false;
         std::uint64_t order_id = readU64BE(record.payload.data() + 8);
-        if (!engine.cancelOrder(order_id)) return false;
+        if (!engine.restoreCancel(order_id)) return false;   // <-- CHANGE: restoreCancel use karo
         ++records_replayed_;
         return true;
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::FILL)) {
         if (record.payload.size() != 40) return false;
         const auto* p = record.payload.data();
-        std::uint64_t resting_id = readU64BE(p+8);
-        std::uint32_t fill_qty = readU32BE(p+24);
+        std::uint64_t resting_id = readU64BE(p + 8);
+        std::uint32_t fill_qty = readU32BE(p + 28);   // Fix: p+24 nahi, p+28
         if (!engine.applyFill(resting_id, fill_qty)) return false;
         ++records_replayed_;
         return true;

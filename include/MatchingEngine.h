@@ -18,6 +18,9 @@ public:
     // Recovery: add order without matching
     bool restoreOrder(const Order& order, uint32_t remaining_quantity);
 
+    // Recovery: cancel order without publishing event
+    bool restoreCancel(uint64_t order_id);
+
     // Recovery: apply a fill to a resting order
     bool applyFill(uint64_t order_id, uint32_t fill_qty);
 
@@ -35,6 +38,13 @@ public:
 
     void setSequenceCounter(std::atomic<std::uint64_t>* counter) {
         sequence_counter_ = counter;
+    }
+
+    // Restart: set the next sequence number after recovery
+    void seedSequence(std::uint64_t next_seq) {
+        if (sequence_counter_) {
+            sequence_counter_->store(next_seq, std::memory_order_release);
+        }
     }
 
 private:
