@@ -176,3 +176,7 @@ size_t MatchingEngine::getOrderCount() const { return book_.getOrderCount(); }
 void MatchingEngine::printBook() const { book_.printBook(); }
 void MatchingEngine::setSTPPolicy(STPPolicy policy) { book_.setSTPPolicy(policy); }
 STPPolicy MatchingEngine::getSTPPolicy() const { return book_.getSTPPolicy(); }
+
+bool MatchingEngine::getOrderById(uint64_t order_id, Order& out) const {
+    return book_.getOrderById(order_id, out);
+} 

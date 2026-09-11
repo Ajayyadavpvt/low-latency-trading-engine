@@ -24,6 +24,9 @@ public:
     // Recovery: apply a fill to a resting order
     bool applyFill(uint64_t order_id, uint32_t fill_qty);
 
+    // Lookup order in book (used by tests/recovery)
+    bool getOrderById(uint64_t order_id, Order& out) const;
+
     double getBestBid() const;
     double getBestAsk() const;
     size_t getOrderCount() const;

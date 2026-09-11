@@ -316,3 +316,54 @@ TEST_F(JournalTest, QueueOverflowSetsUnhealthy) {
     EXPECT_FALSE(journal.isHealthy())
         << "Journal should become unhealthy after queue overflow";
 }
+
+// -----------------------------------------------------------------------------
+// Aggressor Fill Test
+// When an incoming (aggressor) order partially fills and rests, recovery must
+// preserve the correct remaining quantity.
+// Scenario:
+//   Book: SELL 4 @ 100 (rests)
+//   Incoming: BUY 10 @ 100
+//     -> fills 4, remaining 6, rests in book
+// After recovery, BUY should have remaining = 6, not 10.
+// -----------------------------------------------------------------------------
+TEST_F(JournalTest, AggressorPartiallyFillsAndRests) {
+    {
+        MarketDataPublisher pub;
+        Journal journal(file_path_, 1024);
+        pub.subscribe(&journal);
+
+        MatchingEngine engine;
+        engine.setMarketDataPublisher(&pub);
+        std::atomic<uint64_t> seq{0};
+        engine.setSequenceCounter(&seq);
+
+        // Resting SELL 4 @ 100
+        Order sell(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 4, 1);
+        engine.processOrder(sell);
+
+        // Aggressor BUY 10 @ 100 -> fills 4, rests 6
+        Order buy(2, 200, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+        engine.processOrder(buy);
+
+        journal.flush();
+    }
+
+    MatchingEngine recovered;
+    Recovery recovery(file_path_);
+    ASSERT_TRUE(recovery.replay(recovered));
+
+    // Live book after both orders:
+    //   SELL fully filled -> removed
+    //   BUY remaining 6 -> rests
+    EXPECT_EQ(recovered.getOrderCount(), 1u);
+    EXPECT_EQ(recovered.getBestBid(), 100.0);
+    EXPECT_EQ(recovered.getBestAsk(), 0.0);   // no asks left
+
+    // Verify the aggressor's remaining quantity is exactly 6
+    Order restored;
+    bool found = recovered.getOrderById(2, restored);
+    ASSERT_TRUE(found) << "Aggressor order should be resting after partial fill";
+    EXPECT_EQ(restored.remaining_quantity, 6u)
+        << "Aggressor should rest with remaining = 6 after partial fill";
+}
