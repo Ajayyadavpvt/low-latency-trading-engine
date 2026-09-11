@@ -95,4 +95,7 @@ private:
     SyncPolicy sync_policy_ = SyncPolicy::MANUAL;
     std::size_t sync_every_n_ = 1;
     std::size_t records_since_sync_ = 0;
+
+    // Single-producer guarantee: identifies the thread that owns this Journal
+    std::thread::id owner_thread_id_;
 };

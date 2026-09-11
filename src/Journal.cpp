@@ -1,4 +1,5 @@
 #include "Journal.h"
+#include <cassert>
 #include <cstring>
 #include <stdexcept>
 
@@ -175,6 +176,8 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         }
     }
 
+    owner_thread_id_ = std::this_thread::get_id();   // <-- Record owner thread
+
     running_.store(true, std::memory_order_release);
     writer_thread_ = std::thread(&Journal::writerThread, this);
 }
@@ -262,7 +265,6 @@ bool Journal::writeRecord(const JournalRecord& record) {
     if (!writeAll(fd_, body.data(), body.size())) return false;
     if (!writeAll(fd_, crc_bytes.data(), crc_bytes.size())) return false;
 
-    // Apply sync policy
     ++records_since_sync_;
     bool should_sync = false;
     if (sync_policy_ == SyncPolicy::PER_RECORD) {
@@ -272,7 +274,6 @@ bool Journal::writeRecord(const JournalRecord& record) {
             should_sync = true;
         }
     }
-    // MANUAL: no auto sync
 
     if (should_sync) {
         if (j_sync(fd_) != 0) {
@@ -361,6 +362,14 @@ bool Journal::sync() {
 }
 
 void Journal::onEvent(const MarketEvent& event) noexcept {
+    // Single-producer guarantee: all events must come from the same thread
+    // that created the Journal. In debug builds, assert this.
+#ifndef NDEBUG
+    assert(std::this_thread::get_id() == owner_thread_id_ &&
+           "Journal::onEvent called from a different thread — "
+           "one Journal per shard, single producer only");
+#endif
+
     try {
         if (std::holds_alternative<OrderAcceptedEvent>(event)) {
             const auto& e = std::get<OrderAcceptedEvent>(event);

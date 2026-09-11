@@ -61,8 +61,16 @@ bool Recovery::readHeader(std::ifstream& file) {
 }
 
 bool Recovery::validateSequence(std::uint64_t sequence) {
-    if (first_record_) { first_record_ = false; last_sequence_ = sequence; return true; }
-    if (sequence <= last_sequence_) return false;
+    if (first_record_) {
+        first_record_ = false;
+        last_sequence_ = sequence;
+        return true;
+    }
+    // STRICT: sequences must be contiguous (last + 1).
+    // Gaps mean missing records -> reject as corruption.
+    if (sequence != last_sequence_ + 1) {
+        return false;
+    }
     last_sequence_ = sequence;
     return true;
 }
@@ -76,7 +84,6 @@ bool Recovery::readRecord(std::ifstream& file, Record& record, bool& clean_eof, 
     std::uint32_t payload_length = readU32BE(len_bytes.data());
     constexpr std::uint32_t kFixedBody = 4 + 8 + 1;
 
-    // FIXED: Use Journal's kMaxPayloadSize for consistency
     if (payload_length > Journal::kMaxPayloadSize) return false;
 
     std::vector<std::uint8_t> body;
