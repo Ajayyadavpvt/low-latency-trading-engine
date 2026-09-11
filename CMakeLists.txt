@@ -164,3 +164,18 @@ target_link_libraries(run_journal_tests PRIVATE gtest_main Threads::Threads)
 target_include_directories(run_journal_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(run_journal_tests PRIVATE cxx_std_17)
 add_test(NAME journal_tests COMMAND run_journal_tests)
+
+# Sharded Journal Manager test
+add_executable(run_sharded_journal_tests
+    tests/test_sharded_journal.cpp
+    src/ShardedJournalManager.cpp
+    src/Journal.cpp
+    src/Recovery.cpp
+    src/MatchingEngine.cpp
+    src/OrderBook.cpp
+    src/MarketDataPublisher.cpp
+)
+target_link_libraries(run_sharded_journal_tests PRIVATE gtest_main Threads::Threads)
+target_include_directories(run_sharded_journal_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_compile_features(run_sharded_journal_tests PRIVATE cxx_std_17)
+add_test(NAME sharded_journal_tests COMMAND run_sharded_journal_tests)
