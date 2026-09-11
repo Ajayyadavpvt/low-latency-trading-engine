@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <vector>
 
+// Forward declaration to avoid circular include
+class Journal;
+
 class MatchingEngine {
 public:
     MatchingEngine() = default;
@@ -43,12 +46,20 @@ public:
         sequence_counter_ = counter;
     }
 
-    // Restart: set the next sequence number after recovery
     void seedSequence(std::uint64_t next_seq) {
         if (sequence_counter_) {
             sequence_counter_->store(next_seq, std::memory_order_release);
         }
     }
+
+    // Attach a Journal for health monitoring
+    void setJournal(Journal* journal) {
+        journal_ = journal;
+    }
+
+    // Returns true if engine is safe to accept new orders.
+    // False if attached Journal is unhealthy (write failure / queue overflow).
+    bool isHealthy() const;
 
 private:
     std::uint64_t nextSequence();
@@ -56,4 +67,5 @@ private:
     OrderBook book_;
     MarketDataPublisher* publisher_ = nullptr;
     std::atomic<std::uint64_t>* sequence_counter_ = nullptr;
+    Journal* journal_ = nullptr;
 };

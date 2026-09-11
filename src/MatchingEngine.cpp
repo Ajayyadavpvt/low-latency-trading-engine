@@ -1,4 +1,5 @@
 #include "MatchingEngine.h"
+#include "Journal.h"
 #include <chrono>
 #include <cmath>
 
@@ -20,7 +21,21 @@ std::uint64_t MatchingEngine::nextSequence() {
     return 0;
 }
 
+bool MatchingEngine::isHealthy() const {
+    // If a journal is attached, its health determines engine health.
+    // If no journal attached, engine is considered healthy.
+    if (journal_) {
+        return journal_->isHealthy();
+    }
+    return true;
+}
+
 std::vector<Trade> MatchingEngine::processOrder(Order& order) {
+    // Halt trading if journal is unhealthy
+    if (!isHealthy()) {
+        return {};   // reject order silently — caller must check isHealthy()
+    }
+
     std::vector<Trade> trades = book_.matchOrder(order);
     const std::uint64_t ts = getEpochTimestamp();
 
@@ -67,6 +82,10 @@ std::vector<Trade> MatchingEngine::processOrder(Order& order) {
 }
 
 bool MatchingEngine::cancelOrder(uint64_t order_id) {
+    if (!isHealthy()) {
+        return false;
+    }
+
     Order old_order;
     bool found = book_.getOrderById(order_id, old_order);
     bool cancelled = book_.cancelOrder(order_id);
@@ -83,6 +102,10 @@ bool MatchingEngine::cancelOrder(uint64_t order_id) {
 
 ReplaceResult MatchingEngine::replaceOrder(
     uint64_t order_id, double new_price, uint32_t new_qty) {
+
+    if (!isHealthy()) {
+        return ReplaceResult{false, {}};
+    }
 
     Order old_order;
     bool old_found = book_.getOrderById(order_id, old_order);
@@ -137,28 +160,20 @@ ReplaceResult MatchingEngine::replaceOrder(
 }
 
 bool MatchingEngine::restoreOrder(const Order& order, uint32_t remaining_quantity) {
-    // Validate order type
     if (order.type != OrderType::LIMIT) return false;
-
-    // Validate quantity
     if (remaining_quantity == 0 || remaining_quantity > order.quantity) {
         return false;
     }
-
-    // Validate price
     if (!std::isfinite(order.price) || order.price <= 0.0) {
         return false;
     }
-
-    // Check for duplicate order ID
     Order existing;
     if (book_.getOrderById(order.order_id, existing)) {
-        return false;   // Duplicate ID — reject
+        return false;
     }
-
     Order restored = order;
     restored.remaining_quantity = remaining_quantity;
-    return book_.addOrder(restored);   // <-- Propagate addOrder result
+    return book_.addOrder(restored);
 }
 
 bool MatchingEngine::restoreCancel(uint64_t order_id) {

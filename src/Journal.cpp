@@ -176,7 +176,7 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         }
     }
 
-    owner_thread_id_ = std::this_thread::get_id();   // <-- Record owner thread
+    owner_thread_id_ = std::this_thread::get_id();
 
     running_.store(true, std::memory_order_release);
     writer_thread_ = std::thread(&Journal::writerThread, this);
@@ -362,8 +362,6 @@ bool Journal::sync() {
 }
 
 void Journal::onEvent(const MarketEvent& event) noexcept {
-    // Single-producer guarantee: all events must come from the same thread
-    // that created the Journal. In debug builds, assert this.
 #ifndef NDEBUG
     assert(std::this_thread::get_id() == owner_thread_id_ &&
            "Journal::onEvent called from a different thread — "
@@ -397,13 +395,15 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
         } else if (std::holds_alternative<TradeEvent>(event)) {
             const auto& e = std::get<TradeEvent>(event);
             std::vector<std::uint8_t> payload;
-            payload.reserve(40);
+            payload.reserve(48);
             appendU64BE(payload, e.timestamp);
             appendU64BE(payload, e.restingOrderId);
             appendU64BE(payload, e.aggressorOrderId);
             appendU32BE(payload, e.symbolId);
+            appendU32BE(payload, e.traderId);              // <-- NEW
             appendU32BE(payload, e.tradeQuantity);
             appendI64BE(payload, e.tradePriceTicks);
+            appendU8(payload, e.aggressorIsBuy ? 1 : 0);   // <-- NEW
             JournalRecord record(e.sequence, JournalCommand::FILL, std::move(payload));
             enqueue(std::move(record));
         }

@@ -404,3 +404,48 @@ TEST_F(JournalTest, SyncPolicyConfigurable) {
     EXPECT_TRUE(recovery.replay(recovered));
     EXPECT_EQ(recovered.getOrderCount(), 5u);
 }
+
+// -----------------------------------------------------------------------------
+// Engine Halt Policy Test
+// Verify that when Journal becomes unhealthy, MatchingEngine halts trading.
+// -----------------------------------------------------------------------------
+TEST_F(JournalTest, EngineHaltsWhenJournalUnhealthy) {
+    MarketDataPublisher pub;
+    Journal journal(file_path_, 2);   // tiny queue to force overflow
+    pub.subscribe(&journal);
+
+    MatchingEngine engine;
+    engine.setMarketDataPublisher(&pub);
+    engine.setJournal(&journal);
+    std::atomic<uint64_t> seq{0};
+    engine.setSequenceCounter(&seq);
+
+    // Initially healthy
+    EXPECT_TRUE(engine.isHealthy());
+
+    // Flood the journal to force overflow
+    for (int i = 1; i <= 100; ++i) {
+        Order buy(i, 100 + i, OrderSide::BUY, OrderType::LIMIT,
+                  100.0 + i * 0.01, 10, 1);
+        engine.processOrder(buy);
+    }
+
+    // Journal should be unhealthy
+    EXPECT_FALSE(journal.isHealthy())
+        << "Journal should be unhealthy after overflow";
+
+    // Engine should report unhealthy
+    EXPECT_FALSE(engine.isHealthy())
+        << "Engine should halt when journal is unhealthy";
+
+    // New orders should be rejected (return empty trades)
+    size_t orders_before = engine.getOrderCount();
+    Order rejected(9999, 9999, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    auto trades = engine.processOrder(rejected);
+    EXPECT_TRUE(trades.empty())
+        << "Unhealthy engine should reject new orders";
+
+    // Cancel should also fail
+    EXPECT_FALSE(engine.cancelOrder(1))
+        << "Unhealthy engine should reject cancels";
+}

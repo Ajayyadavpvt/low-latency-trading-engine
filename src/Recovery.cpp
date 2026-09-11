@@ -67,7 +67,6 @@ bool Recovery::validateSequence(std::uint64_t sequence) {
         return true;
     }
     // STRICT: sequences must be contiguous (last + 1).
-    // Gaps mean missing records -> reject as corruption.
     if (sequence != last_sequence_ + 1) {
         return false;
     }
@@ -135,10 +134,13 @@ bool Recovery::processRecord(MatchingEngine& engine, const Record& record) {
         ++records_replayed_;
         return true;
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::FILL)) {
-        if (record.payload.size() != 40) return false;
+        // New FILL payload: 45 bytes
+        // timestamp(8) + restingOrderId(8) + aggressorOrderId(8) + symbolId(4)
+        // + traderId(4) + tradeQuantity(4) + tradePriceTicks(8) + aggressorIsBuy(1)
+        if (record.payload.size() != 45) return false;
         const auto* p = record.payload.data();
         std::uint64_t resting_id = readU64BE(p + 8);
-        std::uint32_t fill_qty = readU32BE(p + 28);
+        std::uint32_t fill_qty = readU32BE(p + 32);   // tradeQuantity now at offset 32
         if (!engine.applyFill(resting_id, fill_qty)) return false;
         ++records_replayed_;
         return true;
