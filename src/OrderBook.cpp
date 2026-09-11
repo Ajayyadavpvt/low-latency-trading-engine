@@ -83,10 +83,7 @@ bool OrderBook::cancelOrder(uint64_t order_id) {
     return false;
 }
 
-// Replace an existing order: cancel old, then submit new through matchOrder.
-// If new_qty == 0, simply cancel the old order (success, no trades).
 ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint32_t new_qty) {
-    // Validate price BEFORE touching the original order.
     if (new_qty > 0 && (!std::isfinite(new_price) || new_price <= 0.0)) {
         return ReplaceResult{false, {}};
     }
@@ -99,10 +96,9 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
             if (old.order_id == order_id) {
                 uint32_t already_filled = old.quantity - old.remaining_quantity;
                 if (new_qty > 0 && new_qty < already_filled) {
-                    return ReplaceResult{false, {}}; // cannot shrink below filled qty
+                    return ReplaceResult{false, {}};
                 }
 
-                // Capture fields before erasing
                 uint64_t trader_id  = old.trader_id;
                 OrderSide side      = old.side;
                 OrderType type      = old.type;
@@ -115,7 +111,7 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 }
 
                 if (new_qty == 0) {
-                    return ReplaceResult{true, {}}; // cancel only
+                    return ReplaceResult{true, {}};
                 }
 
                 Order new_order;
@@ -127,12 +123,12 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.quantity           = new_qty;
                 new_order.remaining_quantity = new_qty - already_filled;
                 new_order.symbol_id          = symbol_id;
-                new_order.timestamp          = std::chrono::steady_clock::now().time_since_epoch();
+                new_order.timestamp          = nowSystemNs();   // FIXED
                 new_order.received_time      = received_time;
 
                 auto trades = matchOrder(new_order);
-                std::uint32_t final_remaining = new_order.remaining_quantity;   // <-- ADD
-                return ReplaceResult{true, std::move(trades), final_remaining}; // <-- MODIFY
+                std::uint32_t final_remaining = new_order.remaining_quantity;
+                return ReplaceResult{true, std::move(trades), final_remaining};
             }
         }
     }
@@ -172,17 +168,17 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.quantity           = new_qty;
                 new_order.remaining_quantity = new_qty - already_filled;
                 new_order.symbol_id          = symbol_id;
-                new_order.timestamp          = std::chrono::steady_clock::now().time_since_epoch();
+                new_order.timestamp          = nowSystemNs();   // FIXED
                 new_order.received_time      = received_time;
 
                 auto trades = matchOrder(new_order);
-                std::uint32_t final_remaining = new_order.remaining_quantity;   // <-- ADD
-                return ReplaceResult{true, std::move(trades), final_remaining}; // <-- MODIFY
+                std::uint32_t final_remaining = new_order.remaining_quantity;
+                return ReplaceResult{true, std::move(trades), final_remaining};
             }
         }
     }
 
-    return ReplaceResult{false, {}}; // order not found
+    return ReplaceResult{false, {}};
 }
 
 bool OrderBook::canFullyFill(const Order& incoming) const {
@@ -421,7 +417,6 @@ bool OrderBook::getOrderById(uint64_t order_id, Order& out) const {
 bool OrderBook::applyFill(uint64_t order_id, uint32_t fill_qty) {
     if (fill_qty == 0) return false;
 
-    // Search bids
     for (size_t i = 0; i < bids_.size(); ++i) {
         auto& level = bids_[i];
         for (size_t j = 0; j < level.orders.size(); ++j) {
@@ -440,7 +435,6 @@ bool OrderBook::applyFill(uint64_t order_id, uint32_t fill_qty) {
         }
     }
 
-    // Search asks
     for (size_t i = 0; i < asks_.size(); ++i) {
         auto& level = asks_[i];
         for (size_t j = 0; j < level.orders.size(); ++j) {
