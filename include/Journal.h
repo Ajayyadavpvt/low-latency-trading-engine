@@ -36,7 +36,7 @@ public:
 
     // Public format constants (shared with Recovery)
     static constexpr char kMagic[4] = {'J', 'N', 'L', '2'};
-    static constexpr std::uint8_t kVersion = 2;
+    static constexpr std::uint8_t kVersion = 3;   // version 3: priority_seq in NEW_ORDER
     static constexpr std::size_t kMaxPayloadSize = 1024;
 
     explicit Journal(const std::string& file_path, std::size_t queue_capacity = 16384);
@@ -93,7 +93,7 @@ private:
     std::uint64_t written_records_{0};
 
     SyncPolicy sync_policy_ = SyncPolicy::MANUAL;
-    std::size_t sync_every_n_ = 1;
+    std::size_t sync_every_n_ = 1;   // <-- renamed back to match Journal.cpp
     std::size_t records_since_sync_ = 0;
 
     // Single-producer guarantee: identifies the thread that owns this Journal

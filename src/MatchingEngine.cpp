@@ -22,8 +22,6 @@ std::uint64_t MatchingEngine::nextSequence() {
 }
 
 bool MatchingEngine::isHealthy() const {
-    // If a journal is attached, its health determines engine health.
-    // If no journal attached, engine is considered healthy.
     if (journal_) {
         return journal_->isHealthy();
     }
@@ -31,10 +29,12 @@ bool MatchingEngine::isHealthy() const {
 }
 
 std::vector<Trade> MatchingEngine::processOrder(Order& order) {
-    // Halt trading if journal is unhealthy
     if (!isHealthy()) {
-        return {};   // reject order silently — caller must check isHealthy()
+        return {};
     }
+
+    // Feature E: assign monotonic priority at admission time
+    order.priority_seq = nextPriority();
 
     std::vector<Trade> trades = book_.matchOrder(order);
     const std::uint64_t ts = getEpochTimestamp();
@@ -75,7 +75,8 @@ std::vector<Trade> MatchingEngine::processOrder(Order& order) {
                 doubleToTicks(order.price),
                 order.quantity,
                 order.remaining_quantity,
-                order.type));
+                order.type,
+                order.priority_seq));   // <-- Feature E
         }
     }
     return trades;
@@ -153,7 +154,8 @@ ReplaceResult MatchingEngine::replaceOrder(
                 doubleToTicks(new_price),
                 new_qty,
                 result.final_remaining_quantity,
-                old_order.type));
+                old_order.type,
+                old_order.priority_seq));   // <-- Feature E
         }
     }
     return result;
@@ -173,6 +175,7 @@ bool MatchingEngine::restoreOrder(const Order& order, uint32_t remaining_quantit
     }
     Order restored = order;
     restored.remaining_quantity = remaining_quantity;
+    // priority_seq preserved from journal (already in `order`)
     return book_.addOrder(restored);
 }
 

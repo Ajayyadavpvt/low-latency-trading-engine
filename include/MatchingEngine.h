@@ -27,7 +27,7 @@ public:
     // Recovery: apply a fill to a resting order
     bool applyFill(uint64_t order_id, uint32_t fill_qty);
 
-    // Lookup order in book (used by tests/recovery)
+    // Lookup order in book
     bool getOrderById(uint64_t order_id, Order& out) const;
 
     double getBestBid() const;
@@ -57,9 +57,25 @@ public:
         journal_ = journal;
     }
 
-    // Returns true if engine is safe to accept new orders.
-    // False if attached Journal is unhealthy (write failure / queue overflow).
+    // Returns true if engine is safe to accept new orders
     bool isHealthy() const;
+
+    // ---- Feature E: Monotonic priority sequence ----
+
+    // Seed priority counter after recovery (call before accepting new orders)
+    void seedPrioritySequence(std::uint64_t next_seq) {
+        priority_counter_.store(next_seq, std::memory_order_release);
+    }
+
+    // Current next priority value (for snapshot header)
+    std::uint64_t peekNextPriority() const {
+        return priority_counter_.load(std::memory_order_acquire);
+    }
+
+    // Assign next priority (called internally at order admission)
+    std::uint64_t nextPriority() {
+        return priority_counter_.fetch_add(1, std::memory_order_relaxed);
+    }
 
 private:
     std::uint64_t nextSequence();
@@ -68,4 +84,7 @@ private:
     MarketDataPublisher* publisher_ = nullptr;
     std::atomic<std::uint64_t>* sequence_counter_ = nullptr;
     Journal* journal_ = nullptr;
+
+    // Feature E: monotonic priority counter
+    alignas(64) std::atomic<std::uint64_t> priority_counter_{0};
 };

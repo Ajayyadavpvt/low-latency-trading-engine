@@ -106,25 +106,40 @@ bool Recovery::readRecord(std::ifstream& file, Record& record, bool& clean_eof, 
 
 bool Recovery::processRecord(MatchingEngine& engine, const Record& record) {
     if (record.command == static_cast<std::uint8_t>(JournalCommand::NEW_ORDER)) {
-        if (record.payload.size() != 42) return false;
+        // NEW_ORDER payload (v3): 50 bytes
+        // timestamp(8) + order_id(8) + symbol_id(4) + trader_id(4)
+        // + side(1) + price_ticks(8) + quantity(4) + remaining(4)
+        // + order_type(1) + priority_seq(8)
+        if (record.payload.size() != 50) return false;
         const auto* p = record.payload.data();
         std::uint64_t timestamp = readU64BE(p);
-        std::uint64_t order_id = readU64BE(p+8);
-        std::uint32_t symbol_id = readU32BE(p+16);
-        std::uint32_t trader_id = readU32BE(p+20);
+        std::uint64_t order_id = readU64BE(p + 8);
+        std::uint32_t symbol_id = readU32BE(p + 16);
+        std::uint32_t trader_id = readU32BE(p + 20);
         std::uint8_t side = p[24];
-        std::int64_t price_ticks = readI64BE(p+25);
-        std::uint32_t quantity = readU32BE(p+33);
-        std::uint32_t remaining = readU32BE(p+37);
+        std::int64_t price_ticks = readI64BE(p + 25);
+        std::uint32_t quantity = readU32BE(p + 33);
+        std::uint32_t remaining = readU32BE(p + 37);
         std::uint8_t order_type = p[41];
+        std::uint64_t priority_seq = readU64BE(p + 42);   // <-- Feature E
+
         if (side > 1 || quantity == 0 || remaining == 0 || remaining > quantity) return false;
         if (order_type > static_cast<std::uint8_t>(OrderType::FOK)) return false;
+
         OrderSide os = side == 1 ? OrderSide::BUY : OrderSide::SELL;
         OrderType ot = static_cast<OrderType>(order_type);
         double price = static_cast<double>(price_ticks) / 1000000.0;
         Order order(order_id, trader_id, os, ot, price, quantity, symbol_id);
         order.setTimestamp(std::chrono::nanoseconds(timestamp));
+        order.priority_seq = priority_seq;   // <-- restore priority
+
         if (!engine.restoreOrder(order, remaining)) return false;
+
+        // Track highest priority seen
+        if (priority_seq > max_priority_seq_seen_) {
+            max_priority_seq_seen_ = priority_seq;
+        }
+
         ++records_replayed_;
         return true;
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::CANCEL_ORDER)) {
@@ -134,13 +149,11 @@ bool Recovery::processRecord(MatchingEngine& engine, const Record& record) {
         ++records_replayed_;
         return true;
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::FILL)) {
-        // New FILL payload: 45 bytes
-        // timestamp(8) + restingOrderId(8) + aggressorOrderId(8) + symbolId(4)
-        // + traderId(4) + tradeQuantity(4) + tradePriceTicks(8) + aggressorIsBuy(1)
+        // FILL payload: 45 bytes
         if (record.payload.size() != 45) return false;
         const auto* p = record.payload.data();
         std::uint64_t resting_id = readU64BE(p + 8);
-        std::uint32_t fill_qty = readU32BE(p + 32);   // tradeQuantity now at offset 32
+        std::uint32_t fill_qty = readU32BE(p + 32);
         if (!engine.applyFill(resting_id, fill_qty)) return false;
         ++records_replayed_;
         return true;
@@ -149,7 +162,12 @@ bool Recovery::processRecord(MatchingEngine& engine, const Record& record) {
 }
 
 bool Recovery::replay(MatchingEngine& engine) {
-    records_replayed_ = 0; last_sequence_ = 0; first_record_ = true; truncated_tail_ = false;
+    records_replayed_ = 0;
+    last_sequence_ = 0;
+    first_record_ = true;
+    truncated_tail_ = false;
+    max_priority_seq_seen_ = 0;
+
     std::ifstream file(file_path_, std::ios::binary);
     if (!file) return false;
     if (!readHeader(file)) return false;

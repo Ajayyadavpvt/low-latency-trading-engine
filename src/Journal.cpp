@@ -372,7 +372,7 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
         if (std::holds_alternative<OrderAcceptedEvent>(event)) {
             const auto& e = std::get<OrderAcceptedEvent>(event);
             std::vector<std::uint8_t> payload;
-            payload.reserve(50);
+            payload.reserve(58);
             appendU64BE(payload, e.timestamp);
             appendU64BE(payload, e.orderId);
             appendU32BE(payload, e.symbolId);
@@ -382,6 +382,7 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
             appendU32BE(payload, e.quantity);
             appendU32BE(payload, e.remainingQuantity);
             appendU8(payload, static_cast<std::uint8_t>(e.orderType));
+            appendU64BE(payload, e.prioritySeq);   // <-- Feature E
             JournalRecord record(e.sequence, JournalCommand::NEW_ORDER, std::move(payload));
             enqueue(std::move(record));
         } else if (std::holds_alternative<OrderCancelledEvent>(event)) {
@@ -400,10 +401,10 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
             appendU64BE(payload, e.restingOrderId);
             appendU64BE(payload, e.aggressorOrderId);
             appendU32BE(payload, e.symbolId);
-            appendU32BE(payload, e.traderId);              // <-- NEW
+            appendU32BE(payload, e.traderId);
             appendU32BE(payload, e.tradeQuantity);
             appendI64BE(payload, e.tradePriceTicks);
-            appendU8(payload, e.aggressorIsBuy ? 1 : 0);   // <-- NEW
+            appendU8(payload, e.aggressorIsBuy ? 1 : 0);
             JournalRecord record(e.sequence, JournalCommand::FILL, std::move(payload));
             enqueue(std::move(record));
         }

@@ -23,16 +23,19 @@ struct OrderAcceptedEvent {
     std::uint32_t quantity;
     std::uint32_t remainingQuantity;
     OrderType orderType;
+    std::uint64_t prioritySeq;   // <-- NEW: Feature E
 
     OrderAcceptedEvent(
         std::uint64_t ts, std::uint64_t seq, std::uint64_t oid,
         std::uint32_t sid, std::uint32_t tid,
         bool buy, std::int64_t px, std::uint32_t qty,
-        std::uint32_t remQty, OrderType type)
+        std::uint32_t remQty, OrderType type,
+        std::uint64_t priority)   // <-- NEW parameter
         : timestamp(ts), sequence(seq), orderId(oid),
           symbolId(sid), traderId(tid),
           isBuy(buy), priceTicks(px), quantity(qty),
-          remainingQuantity(remQty), orderType(type) {}
+          remainingQuantity(remQty), orderType(type),
+          prioritySeq(priority) {}
 };
 
 struct TradeEvent {

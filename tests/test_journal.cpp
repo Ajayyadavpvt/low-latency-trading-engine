@@ -92,7 +92,7 @@ TEST_F(JournalTest, EmptyJournal) {
     {
         std::ofstream file(file_path_, std::ios::binary);
         file.write("JNL2", 4);
-        std::uint8_t ver = 2;
+        std::uint8_t ver = 3;   // <-- v3 (matches Journal::kVersion)
         file.write(reinterpret_cast<const char*>(&ver), 1);
         file.close();
     }
@@ -195,7 +195,6 @@ TEST_F(JournalTest, RestartSequenceContinues) {
 // Failure Mode Tests
 // -----------------------------------------------------------------------------
 
-// Corrupt CRC: flip a byte in a valid record, recovery should fail
 TEST_F(JournalTest, CorruptCRCDetected) {
     {
         MarketDataPublisher pub;
@@ -212,14 +211,10 @@ TEST_F(JournalTest, CorruptCRCDetected) {
         journal.flush();
     }
 
-    // Corrupt a byte inside the record body
     {
         std::fstream file(file_path_, std::ios::binary | std::ios::in | std::ios::out);
         ASSERT_TRUE(file.is_open());
 
-        // Header = 5 bytes. First record starts at offset 5.
-        // Record: length(4) + sequence(8) + command(1) + payload(42) + crc(4)
-        // Corrupt byte at offset 10 (inside sequence field)
         file.seekp(10);
         char bad_byte = static_cast<char>(0xFF);
         file.write(&bad_byte, 1);
@@ -232,8 +227,6 @@ TEST_F(JournalTest, CorruptCRCDetected) {
         << "Recovery should fail on corrupt CRC";
 }
 
-// Truncated tail: cut the file mid-record, recovery should succeed
-// with hadTruncatedTail() == true and all complete records replayed
 TEST_F(JournalTest, TruncatedTailHandled) {
     {
         MarketDataPublisher pub;
@@ -252,7 +245,6 @@ TEST_F(JournalTest, TruncatedTailHandled) {
         journal.flush();
     }
 
-    // Truncate the last few bytes (cut last record mid-write)
     {
         std::ifstream in(file_path_, std::ios::binary | std::ios::ate);
         auto size = in.tellg();
@@ -269,35 +261,23 @@ TEST_F(JournalTest, TruncatedTailHandled) {
     EXPECT_GE(recovery.recordsReplayed(), 1u);
 }
 
-// -----------------------------------------------------------------------------
-// Duplicate Order ID Protection Test
-// restoreOrder should reject an order whose ID already exists in the book.
-// -----------------------------------------------------------------------------
 TEST_F(JournalTest, DuplicateOrderIdRejected) {
     MatchingEngine engine;
 
-    // First restore — should succeed
     Order order1(100, 500, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
     EXPECT_TRUE(engine.restoreOrder(order1, 10));
     EXPECT_EQ(engine.getOrderCount(), 1u);
 
-    // Second restore with SAME order ID — should be rejected
     Order order2(100, 500, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
     EXPECT_FALSE(engine.restoreOrder(order2, 10))
         << "Duplicate order ID should be rejected";
 
-    // Book should still only have 1 order
     EXPECT_EQ(engine.getOrderCount(), 1u);
 }
 
-// -----------------------------------------------------------------------------
-// Queue Overflow Policy Test
-// When queue is full, journal should become unhealthy and reject new records.
-// -----------------------------------------------------------------------------
 TEST_F(JournalTest, QueueOverflowSetsUnhealthy) {
-    // Use tiny queue (capacity = 2) to force overflow easily
     MarketDataPublisher pub;
-    Journal journal(file_path_, 2);   // capacity = 2
+    Journal journal(file_path_, 2);
     pub.subscribe(&journal);
 
     MatchingEngine engine;
@@ -305,28 +285,16 @@ TEST_F(JournalTest, QueueOverflowSetsUnhealthy) {
     std::atomic<uint64_t> seq{0};
     engine.setSequenceCounter(&seq);
 
-    // Push many orders rapidly — should fill queue and trigger unhealthy
     for (int i = 1; i <= 100; ++i) {
         Order buy(i, 100 + i, OrderSide::BUY, OrderType::LIMIT,
                   100.0 + i * 0.01, 10, 1);
         engine.processOrder(buy);
     }
 
-    // Journal should be unhealthy after overflow
     EXPECT_FALSE(journal.isHealthy())
         << "Journal should become unhealthy after queue overflow";
 }
 
-// -----------------------------------------------------------------------------
-// Aggressor Fill Test
-// When an incoming (aggressor) order partially fills and rests, recovery must
-// preserve the correct remaining quantity.
-// Scenario:
-//   Book: SELL 4 @ 100 (rests)
-//   Incoming: BUY 10 @ 100
-//     -> fills 4, remaining 6, rests in book
-// After recovery, BUY should have remaining = 6, not 10.
-// -----------------------------------------------------------------------------
 TEST_F(JournalTest, AggressorPartiallyFillsAndRests) {
     {
         MarketDataPublisher pub;
@@ -338,11 +306,9 @@ TEST_F(JournalTest, AggressorPartiallyFillsAndRests) {
         std::atomic<uint64_t> seq{0};
         engine.setSequenceCounter(&seq);
 
-        // Resting SELL 4 @ 100
         Order sell(1, 100, OrderSide::SELL, OrderType::LIMIT, 100.0, 4, 1);
         engine.processOrder(sell);
 
-        // Aggressor BUY 10 @ 100 -> fills 4, rests 6
         Order buy(2, 200, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
         engine.processOrder(buy);
 
@@ -353,14 +319,10 @@ TEST_F(JournalTest, AggressorPartiallyFillsAndRests) {
     Recovery recovery(file_path_);
     ASSERT_TRUE(recovery.replay(recovered));
 
-    // Live book after both orders:
-    //   SELL fully filled -> removed
-    //   BUY remaining 6 -> rests
     EXPECT_EQ(recovered.getOrderCount(), 1u);
     EXPECT_EQ(recovered.getBestBid(), 100.0);
-    EXPECT_EQ(recovered.getBestAsk(), 0.0);   // no asks left
+    EXPECT_EQ(recovered.getBestAsk(), 0.0);
 
-    // Verify the aggressor's remaining quantity is exactly 6
     Order restored;
     bool found = recovered.getOrderById(2, restored);
     ASSERT_TRUE(found) << "Aggressor order should be resting after partial fill";
@@ -368,16 +330,11 @@ TEST_F(JournalTest, AggressorPartiallyFillsAndRests) {
         << "Aggressor should rest with remaining = 6 after partial fill";
 }
 
-// -----------------------------------------------------------------------------
-// Sync Policy Test
-// Verify that setSyncPolicy() can be configured and sync() works.
-// -----------------------------------------------------------------------------
 TEST_F(JournalTest, SyncPolicyConfigurable) {
     MarketDataPublisher pub;
     Journal journal(file_path_, 1024);
     pub.subscribe(&journal);
 
-    // Default policy is MANUAL — sync() should still work
     journal.setSyncPolicy(Journal::SyncPolicy::PER_RECORD);
     journal.setSyncPolicy(Journal::SyncPolicy::PER_N_RECORDS, 10);
     journal.setSyncPolicy(Journal::SyncPolicy::MANUAL);
@@ -387,31 +344,24 @@ TEST_F(JournalTest, SyncPolicyConfigurable) {
     std::atomic<uint64_t> seq{0};
     engine.setSequenceCounter(&seq);
 
-    // Write a few orders
     for (int i = 1; i <= 5; ++i) {
         Order buy(i, 100 + i, OrderSide::BUY, OrderType::LIMIT,
                   100.0 + i * 0.1, 10, 1);
         engine.processOrder(buy);
     }
 
-    // Explicit sync should succeed
     EXPECT_TRUE(journal.sync());
     EXPECT_TRUE(journal.isHealthy());
 
-    // Recovery should work
     MatchingEngine recovered;
     Recovery recovery(file_path_);
     EXPECT_TRUE(recovery.replay(recovered));
     EXPECT_EQ(recovered.getOrderCount(), 5u);
 }
 
-// -----------------------------------------------------------------------------
-// Engine Halt Policy Test
-// Verify that when Journal becomes unhealthy, MatchingEngine halts trading.
-// -----------------------------------------------------------------------------
 TEST_F(JournalTest, EngineHaltsWhenJournalUnhealthy) {
     MarketDataPublisher pub;
-    Journal journal(file_path_, 2);   // tiny queue to force overflow
+    Journal journal(file_path_, 2);
     pub.subscribe(&journal);
 
     MatchingEngine engine;
@@ -420,32 +370,94 @@ TEST_F(JournalTest, EngineHaltsWhenJournalUnhealthy) {
     std::atomic<uint64_t> seq{0};
     engine.setSequenceCounter(&seq);
 
-    // Initially healthy
     EXPECT_TRUE(engine.isHealthy());
 
-    // Flood the journal to force overflow
     for (int i = 1; i <= 100; ++i) {
         Order buy(i, 100 + i, OrderSide::BUY, OrderType::LIMIT,
                   100.0 + i * 0.01, 10, 1);
         engine.processOrder(buy);
     }
 
-    // Journal should be unhealthy
     EXPECT_FALSE(journal.isHealthy())
         << "Journal should be unhealthy after overflow";
 
-    // Engine should report unhealthy
     EXPECT_FALSE(engine.isHealthy())
         << "Engine should halt when journal is unhealthy";
 
-    // New orders should be rejected (return empty trades)
-    size_t orders_before = engine.getOrderCount();
     Order rejected(9999, 9999, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
     auto trades = engine.processOrder(rejected);
     EXPECT_TRUE(trades.empty())
         << "Unhealthy engine should reject new orders";
 
-    // Cancel should also fail
     EXPECT_FALSE(engine.cancelOrder(1))
         << "Unhealthy engine should reject cancels";
+}
+
+// =============================================================================
+// Feature E: Monotonic Priority Sequence Tests
+// =============================================================================
+
+TEST_F(JournalTest, PrioritySequenceAssignedSequentially) {
+    MatchingEngine engine;
+
+    Order a(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    Order b(2, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    Order c(3, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+
+    engine.processOrder(a);
+    engine.processOrder(b);
+    engine.processOrder(c);
+
+    EXPECT_EQ(a.priority_seq, 0u);
+    EXPECT_EQ(b.priority_seq, 1u);
+    EXPECT_EQ(c.priority_seq, 2u);
+}
+
+TEST_F(JournalTest, PrioritySequenceSeeded) {
+    MatchingEngine engine;
+    engine.seedPrioritySequence(1000);
+
+    Order a(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    engine.processOrder(a);
+
+    EXPECT_EQ(a.priority_seq, 1000u);
+    EXPECT_EQ(engine.peekNextPriority(), 1001u);
+}
+
+TEST_F(JournalTest, PrioritySequencePreservedAcrossRecovery) {
+    // Phase 1: journal 3 orders with priorities 0, 1, 2
+    {
+        MarketDataPublisher pub;
+        Journal journal(file_path_, 1024);
+        pub.subscribe(&journal);
+
+        MatchingEngine engine;
+        engine.setMarketDataPublisher(&pub);
+        std::atomic<uint64_t> seq{0};
+        engine.setSequenceCounter(&seq);
+
+        Order a(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+        engine.processOrder(a);
+        Order b(2, 200, OrderSide::BUY, OrderType::LIMIT, 99.0, 10, 1);
+        engine.processOrder(b);
+        Order c(3, 300, OrderSide::BUY, OrderType::LIMIT, 98.0, 10, 1);
+        engine.processOrder(c);
+
+        journal.flush();
+    }
+
+    // Phase 2: recover, check next priority is 3
+    MatchingEngine recovered;
+    Recovery recovery(file_path_);
+    ASSERT_TRUE(recovery.replay(recovered));
+
+    EXPECT_EQ(recovery.lastPrioritySeqSeen(), 2u);
+    EXPECT_EQ(recovery.nextPrioritySequence(), 3u);
+
+    // Seed and verify
+    recovered.seedPrioritySequence(recovery.nextPrioritySequence());
+
+    Order d(4, 400, OrderSide::BUY, OrderType::LIMIT, 97.0, 10, 1);
+    recovered.processOrder(d);
+    EXPECT_EQ(d.priority_seq, 3u);
 }

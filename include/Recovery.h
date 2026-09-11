@@ -16,8 +16,17 @@ public:
     std::uint64_t lastSequence() const noexcept { return last_sequence_; }
     bool hadTruncatedTail() const noexcept { return truncated_tail_; }
 
+    // Feature E: next priority sequence to seed the engine with
+    std::uint64_t nextPrioritySequence() const noexcept {
+        return records_replayed_ > 0 ? max_priority_seq_seen_ + 1 : 0;
+    }
+
+    std::uint64_t lastPrioritySeqSeen() const noexcept {
+        return max_priority_seq_seen_;
+    }
+
 private:
-    static constexpr std::uint8_t kVersion = 2;
+    static constexpr std::uint8_t kVersion = 3;   // <-- bumped to 3 (matches Journal)
 
     struct Record {
         std::uint64_t sequence;
@@ -40,4 +49,7 @@ private:
     std::uint64_t last_sequence_{0};
     bool first_record_{true};
     bool truncated_tail_{false};
+
+    // Feature E
+    std::uint64_t max_priority_seq_seen_{0};
 };

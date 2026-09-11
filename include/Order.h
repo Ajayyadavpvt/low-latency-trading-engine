@@ -11,8 +11,6 @@
 enum class OrderSide { BUY, SELL };
 enum class OrderType { MARKET, LIMIT, IOC, FOK };
 
-// Timestamp uses system_clock (nanoseconds since Unix epoch)
-// This ensures consistent recovery across restarts.
 static inline std::chrono::nanoseconds nowSystemNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()
@@ -30,19 +28,22 @@ struct Order {
     uint32_t remaining_quantity;
     std::chrono::nanoseconds timestamp;
     std::chrono::nanoseconds received_time;
+    uint64_t priority_seq;   // <-- NEW: monotonic FIFO priority
 
     Order()
         : order_id(0), trader_id(0), symbol_id(0), side(OrderSide::BUY), type(OrderType::MARKET),
           price(0.0), quantity(0), remaining_quantity(0),
           timestamp(nowSystemNs()),
-          received_time(timestamp) {}
+          received_time(timestamp),
+          priority_seq(0) {}
 
     Order(uint64_t oid, uint64_t tid, OrderSide s, OrderType t,
           double p, uint32_t qty, SymbolId sym = 0)
         : order_id(oid), trader_id(tid), symbol_id(sym), side(s), type(t), price(p),
           quantity(qty), remaining_quantity(qty),
           timestamp(nowSystemNs()),
-          received_time(timestamp) {
+          received_time(timestamp),
+          priority_seq(0) {
         if (qty == 0) throw std::invalid_argument("Order quantity must be positive");
         if (oid == 0) throw std::invalid_argument("Order ID must be non-zero");
         if (tid == 0) throw std::invalid_argument("Trader ID must be non-zero");
