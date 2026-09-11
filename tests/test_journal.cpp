@@ -367,3 +367,40 @@ TEST_F(JournalTest, AggressorPartiallyFillsAndRests) {
     EXPECT_EQ(restored.remaining_quantity, 6u)
         << "Aggressor should rest with remaining = 6 after partial fill";
 }
+
+// -----------------------------------------------------------------------------
+// Sync Policy Test
+// Verify that setSyncPolicy() can be configured and sync() works.
+// -----------------------------------------------------------------------------
+TEST_F(JournalTest, SyncPolicyConfigurable) {
+    MarketDataPublisher pub;
+    Journal journal(file_path_, 1024);
+    pub.subscribe(&journal);
+
+    // Default policy is MANUAL — sync() should still work
+    journal.setSyncPolicy(Journal::SyncPolicy::PER_RECORD);
+    journal.setSyncPolicy(Journal::SyncPolicy::PER_N_RECORDS, 10);
+    journal.setSyncPolicy(Journal::SyncPolicy::MANUAL);
+
+    MatchingEngine engine;
+    engine.setMarketDataPublisher(&pub);
+    std::atomic<uint64_t> seq{0};
+    engine.setSequenceCounter(&seq);
+
+    // Write a few orders
+    for (int i = 1; i <= 5; ++i) {
+        Order buy(i, 100 + i, OrderSide::BUY, OrderType::LIMIT,
+                  100.0 + i * 0.1, 10, 1);
+        engine.processOrder(buy);
+    }
+
+    // Explicit sync should succeed
+    EXPECT_TRUE(journal.sync());
+    EXPECT_TRUE(journal.isHealthy());
+
+    // Recovery should work
+    MatchingEngine recovered;
+    Recovery recovery(file_path_);
+    EXPECT_TRUE(recovery.replay(recovered));
+    EXPECT_EQ(recovered.getOrderCount(), 5u);
+}

@@ -47,7 +47,6 @@
 
 namespace {
 
-// Cross-platform helper: write all bytes or fail
 bool writeAll(int fd, const void* data, std::size_t size) {
     const std::uint8_t* p = static_cast<const std::uint8_t*>(data);
     std::size_t remaining = size;
@@ -60,7 +59,6 @@ bool writeAll(int fd, const void* data, std::size_t size) {
     return true;
 }
 
-// Cross-platform helper: read all bytes or fail
 bool readAll(int fd, void* data, std::size_t size) {
     std::uint8_t* p = static_cast<std::uint8_t*>(data);
     std::size_t remaining = size;
@@ -118,14 +116,12 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         throw std::invalid_argument("Journal: queue capacity must be > 0");
     }
 
-    // Open with O_RDWR so we can both validate header (read) and append (write)
     fd_ = j_open(file_path_.c_str(), JOURNAL_OPEN_FLAGS, JOURNAL_OPEN_MODE);
     if (fd_ < 0) {
         healthy_.store(false, std::memory_order_release);
         throw std::runtime_error("Journal: cannot open file: " + file_path_);
     }
 
-    // Determine current file size
     long long file_size = j_lseek(fd_, 0, SEEK_END);
     if (file_size < 0) {
         j_close(fd_);
@@ -134,7 +130,6 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         throw std::runtime_error("Journal: seek end failed");
     }
 
-    // Validate existing header if file non-empty
     if (file_size > 0) {
         if (file_size < 5) {
             j_close(fd_);
@@ -164,7 +159,6 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         }
     }
 
-    // Move to end for appending
     if (j_lseek(fd_, 0, SEEK_END) < 0) {
         j_close(fd_);
         fd_ = -1;
@@ -172,7 +166,6 @@ Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
         throw std::runtime_error("Journal: seek end failed");
     }
 
-    // If file was empty, write header
     if (file_size == 0) {
         if (!writeHeader()) {
             j_close(fd_);
@@ -194,7 +187,6 @@ Journal::~Journal() {
     queue_cv_.notify_all();
     if (writer_thread_.joinable()) writer_thread_.join();
 
-    // Final flush and sync
     flush();
 
     std::lock_guard<std::mutex> lock(file_mutex_);
@@ -203,6 +195,13 @@ Journal::~Journal() {
         j_close(fd_);
         fd_ = -1;
     }
+}
+
+void Journal::setSyncPolicy(SyncPolicy policy, std::size_t n) {
+    std::lock_guard<std::mutex> lock(file_mutex_);
+    sync_policy_ = policy;
+    sync_every_n_ = (n == 0) ? 1 : n;
+    records_since_sync_ = 0;
 }
 
 bool Journal::writeHeader() {
@@ -236,6 +235,15 @@ bool Journal::enqueue(JournalRecord&& record) noexcept {
     return true;
 }
 
+bool Journal::doFdatasync() {
+    if (fd_ < 0) return false;
+    if (j_sync(fd_) != 0) {
+        healthy_.store(false, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
 bool Journal::writeRecord(const JournalRecord& record) {
     std::vector<std::uint8_t> body;
     body.reserve(13 + record.payload.size());
@@ -253,6 +261,27 @@ bool Journal::writeRecord(const JournalRecord& record) {
     if (fd_ < 0) return false;
     if (!writeAll(fd_, body.data(), body.size())) return false;
     if (!writeAll(fd_, crc_bytes.data(), crc_bytes.size())) return false;
+
+    // Apply sync policy
+    ++records_since_sync_;
+    bool should_sync = false;
+    if (sync_policy_ == SyncPolicy::PER_RECORD) {
+        should_sync = true;
+    } else if (sync_policy_ == SyncPolicy::PER_N_RECORDS) {
+        if (records_since_sync_ >= sync_every_n_) {
+            should_sync = true;
+        }
+    }
+    // MANUAL: no auto sync
+
+    if (should_sync) {
+        if (j_sync(fd_) != 0) {
+            healthy_.store(false, std::memory_order_release);
+            return false;
+        }
+        records_since_sync_ = 0;
+    }
+
     return true;
 }
 
@@ -285,8 +314,6 @@ void Journal::writerThread() {
                 healthy_.store(false, std::memory_order_release);
                 running_.store(false, std::memory_order_release);
             }
-            // FIX: Notify after EVERY write, not just when queue fully drained.
-            // This prevents flush() from blocking indefinitely under continuous load.
             drained_cv_.notify_all();
         }
 
@@ -307,19 +334,16 @@ bool Journal::waitUntilWritten(std::uint64_t target) {
 }
 
 bool Journal::flush() {
-    // Snapshot target: number of records enqueued up to this instant
     std::uint64_t target;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         target = queued_records_;
     }
 
-    // Wait until writer has processed all records up to that target
     if (!waitUntilWritten(target)) {
         return false;
     }
 
-    // Data is written directly to fd (no user-space buffering to flush)
     return healthy_.load(std::memory_order_acquire);
 }
 
@@ -329,12 +353,10 @@ bool Journal::sync() {
     }
 
     std::lock_guard<std::mutex> lock(file_mutex_);
-    if (fd_ < 0) return false;
-
-    if (j_sync(fd_) != 0) {
-        healthy_.store(false, std::memory_order_release);
+    if (!doFdatasync()) {
         return false;
     }
+    records_since_sync_ = 0;
     return true;
 }
 
@@ -376,7 +398,6 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
             JournalRecord record(e.sequence, JournalCommand::FILL, std::move(payload));
             enqueue(std::move(record));
         }
-        // OrderRejectedEvent ignored
     } catch (...) {
         healthy_.store(false, std::memory_order_release);
     }

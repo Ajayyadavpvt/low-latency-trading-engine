@@ -28,6 +28,12 @@ struct JournalRecord {
 
 class Journal final : public MarketDataSubscriber {
 public:
+    enum class SyncPolicy {
+        PER_RECORD,     // fdatasync after every record (safest, slowest)
+        PER_N_RECORDS,  // fdatasync after N records
+        MANUAL          // only when sync() is called explicitly
+    };
+
     explicit Journal(const std::string& file_path, std::size_t queue_capacity = 16384);
     ~Journal() override;
 
@@ -39,13 +45,14 @@ public:
     bool flush();
     bool sync();
 
+    void setSyncPolicy(SyncPolicy policy, std::size_t n = 1);
+
     bool isHealthy() const noexcept { return healthy_.load(std::memory_order_acquire); }
     std::uint64_t lastWrittenSequence() const noexcept {
         return last_written_sequence_.load(std::memory_order_acquire);
     }
 
 private:
-    // Magic bytes for journal header (JNL2)
     static constexpr char kMagic[4] = {'J', 'N', 'L', '2'};
     static constexpr std::uint8_t kVersion = 2;
     static constexpr std::size_t kMaxPayloadSize = 1024;
@@ -57,6 +64,7 @@ private:
     bool openFile();
     bool validateExistingHeader();
     bool waitUntilWritten(std::uint64_t target);
+    bool doFdatasync();   // helper
 
     std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
 
@@ -66,7 +74,7 @@ private:
     static void appendI64BE(std::vector<std::uint8_t>& out, std::int64_t value);
 
     std::string file_path_;
-    int fd_ = -1;   // raw POSIX file descriptor (no more std::fstream)
+    int fd_ = -1;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> healthy_{true};
@@ -82,4 +90,9 @@ private:
 
     std::uint64_t queued_records_{0};
     std::uint64_t written_records_{0};
+
+    // Durability policy
+    SyncPolicy sync_policy_ = SyncPolicy::MANUAL;
+    std::size_t sync_every_n_ = 1;
+    std::size_t records_since_sync_ = 0;
 };
