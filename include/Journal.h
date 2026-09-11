@@ -34,6 +34,11 @@ public:
         MANUAL          // only when sync() is called explicitly
     };
 
+    // Public format constants (shared with Recovery)
+    static constexpr char kMagic[4] = {'J', 'N', 'L', '2'};
+    static constexpr std::uint8_t kVersion = 2;
+    static constexpr std::size_t kMaxPayloadSize = 1024;
+
     explicit Journal(const std::string& file_path, std::size_t queue_capacity = 16384);
     ~Journal() override;
 
@@ -53,10 +58,6 @@ public:
     }
 
 private:
-    static constexpr char kMagic[4] = {'J', 'N', 'L', '2'};
-    static constexpr std::uint8_t kVersion = 2;
-    static constexpr std::size_t kMaxPayloadSize = 1024;
-
     void writerThread();
     bool enqueue(JournalRecord&& record) noexcept;
     bool writeRecord(const JournalRecord& record);
@@ -64,7 +65,7 @@ private:
     bool openFile();
     bool validateExistingHeader();
     bool waitUntilWritten(std::uint64_t target);
-    bool doFdatasync();   // helper
+    bool doFdatasync();
 
     std::uint32_t crc32(const std::uint8_t* data, std::size_t size) noexcept;
 
@@ -91,7 +92,6 @@ private:
     std::uint64_t queued_records_{0};
     std::uint64_t written_records_{0};
 
-    // Durability policy
     SyncPolicy sync_policy_ = SyncPolicy::MANUAL;
     std::size_t sync_every_n_ = 1;
     std::size_t records_since_sync_ = 0;

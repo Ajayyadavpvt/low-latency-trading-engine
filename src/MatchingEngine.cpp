@@ -158,8 +158,7 @@ bool MatchingEngine::restoreOrder(const Order& order, uint32_t remaining_quantit
 
     Order restored = order;
     restored.remaining_quantity = remaining_quantity;
-    book_.addOrder(restored);
-    return true;
+    return book_.addOrder(restored);   // <-- Propagate addOrder result
 }
 
 bool MatchingEngine::restoreCancel(uint64_t order_id) {
@@ -179,4 +178,4 @@ STPPolicy MatchingEngine::getSTPPolicy() const { return book_.getSTPPolicy(); }
 
 bool MatchingEngine::getOrderById(uint64_t order_id, Order& out) const {
     return book_.getOrderById(order_id, out);
-} 
+}

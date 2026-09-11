@@ -21,7 +21,7 @@ enum class STPPolicy {
 struct ReplaceResult {
     bool success = false;
     std::vector<Trade> trades;
-    std::uint32_t final_remaining_quantity = 0;   // <-- ADD THIS
+    std::uint32_t final_remaining_quantity = 0;
 };
 
 class OrderBook {
@@ -31,7 +31,7 @@ public:
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;
 
-    void addOrder(const Order& order);
+    bool addOrder(const Order& order);   // <-- CHANGED: void to bool
     bool cancelOrder(uint64_t order_id);
     ReplaceResult replaceOrder(uint64_t order_id, double new_price, uint32_t new_qty);
     std::vector<Trade> matchOrder(Order& incoming);

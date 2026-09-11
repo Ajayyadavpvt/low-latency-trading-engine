@@ -32,27 +32,37 @@ size_t OrderBook::findAskLevel(double price) const {
     return low;
 }
 
-void OrderBook::addOrder(const Order& order) {
-    OrderPool* pool = &order_pool_;
-    if (order.side == OrderSide::BUY) {
-        size_t idx = findBidLevel(order.price);
-        if (idx < bids_.size() && bids_[idx].price == order.price) {
-            bids_[idx].orders.push_back(order);
-        } else {
-            PriceLevel level(pool, order.price);
-            level.orders.push_back(order);
-            bids_.insert(bids_.begin() + idx, std::move(level));
-        }
-    } else {
-        size_t idx = findAskLevel(order.price);
-        if (idx < asks_.size() && asks_[idx].price == order.price) {
-            asks_[idx].orders.push_back(order);
-        } else {
-            PriceLevel level(pool, order.price);
-            level.orders.push_back(order);
-            asks_.insert(asks_.begin() + idx, std::move(level));
-        }
+bool OrderBook::addOrder(const Order& order) {
+    // Validate order
+    if (order.quantity == 0 || order.remaining_quantity == 0) {
+        return false;
     }
+
+    OrderPool* pool = &order_pool_;
+    try {
+        if (order.side == OrderSide::BUY) {
+            size_t idx = findBidLevel(order.price);
+            if (idx < bids_.size() && bids_[idx].price == order.price) {
+                bids_[idx].orders.push_back(order);
+            } else {
+                PriceLevel level(pool, order.price);
+                level.orders.push_back(order);
+                bids_.insert(bids_.begin() + idx, std::move(level));
+            }
+        } else {
+            size_t idx = findAskLevel(order.price);
+            if (idx < asks_.size() && asks_[idx].price == order.price) {
+                asks_[idx].orders.push_back(order);
+            } else {
+                PriceLevel level(pool, order.price);
+                level.orders.push_back(order);
+                asks_.insert(asks_.begin() + idx, std::move(level));
+            }
+        }
+    } catch (...) {
+        return false;  // allocation failure
+    }
+    return true;
 }
 
 bool OrderBook::cancelOrder(uint64_t order_id) {
@@ -123,7 +133,7 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.quantity           = new_qty;
                 new_order.remaining_quantity = new_qty - already_filled;
                 new_order.symbol_id          = symbol_id;
-                new_order.timestamp          = nowSystemNs();   // FIXED
+                new_order.timestamp          = nowSystemNs();
                 new_order.received_time      = received_time;
 
                 auto trades = matchOrder(new_order);
@@ -168,7 +178,7 @@ ReplaceResult OrderBook::replaceOrder(uint64_t order_id, double new_price, uint3
                 new_order.quantity           = new_qty;
                 new_order.remaining_quantity = new_qty - already_filled;
                 new_order.symbol_id          = symbol_id;
-                new_order.timestamp          = nowSystemNs();   // FIXED
+                new_order.timestamp          = nowSystemNs();
                 new_order.received_time      = received_time;
 
                 auto trades = matchOrder(new_order);
@@ -356,7 +366,7 @@ std::vector<Trade> OrderBook::matchOrder(Order& incoming) {
         incoming.type != OrderType::MARKET &&
         incoming.type != OrderType::IOC &&
         incoming.type != OrderType::FOK) {
-        addOrder(incoming);
+        addOrder(incoming);   // ignore return for live path (best effort)
     }
 
     return trades;

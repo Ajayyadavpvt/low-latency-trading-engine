@@ -75,7 +75,9 @@ bool Recovery::readRecord(std::ifstream& file, Record& record, bool& clean_eof, 
     if (!file) { truncated = true; return false; }
     std::uint32_t payload_length = readU32BE(len_bytes.data());
     constexpr std::uint32_t kFixedBody = 4 + 8 + 1;
-    if (payload_length > 1024 * 1024) return false;
+
+    // FIXED: Use Journal's kMaxPayloadSize for consistency
+    if (payload_length > Journal::kMaxPayloadSize) return false;
 
     std::vector<std::uint8_t> body;
     body.resize(kFixedBody + payload_length);
@@ -122,14 +124,14 @@ bool Recovery::processRecord(MatchingEngine& engine, const Record& record) {
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::CANCEL_ORDER)) {
         if (record.payload.size() != 16) return false;
         std::uint64_t order_id = readU64BE(record.payload.data() + 8);
-        if (!engine.restoreCancel(order_id)) return false;   // <-- CHANGE: restoreCancel use karo
+        if (!engine.restoreCancel(order_id)) return false;
         ++records_replayed_;
         return true;
     } else if (record.command == static_cast<std::uint8_t>(JournalCommand::FILL)) {
         if (record.payload.size() != 40) return false;
         const auto* p = record.payload.data();
         std::uint64_t resting_id = readU64BE(p + 8);
-        std::uint32_t fill_qty = readU32BE(p + 28);   // Fix: p+24 nahi, p+28
+        std::uint32_t fill_qty = readU32BE(p + 28);
         if (!engine.applyFill(resting_id, fill_qty)) return false;
         ++records_replayed_;
         return true;
