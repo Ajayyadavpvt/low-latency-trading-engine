@@ -155,6 +155,7 @@ add_test(NAME marketdata_tests COMMAND run_marketdata_tests)
 add_executable(run_journal_tests
     tests/test_journal.cpp
     src/Journal.cpp
+    src/JournalRingBuffer.cpp
     src/Recovery.cpp
     src/MatchingEngine.cpp
     src/OrderBook.cpp
@@ -170,6 +171,7 @@ add_executable(run_sharded_journal_tests
     tests/test_sharded_journal.cpp
     src/ShardedJournalManager.cpp
     src/Journal.cpp
+    src/JournalRingBuffer.cpp
     src/Recovery.cpp
     src/MatchingEngine.cpp
     src/OrderBook.cpp
@@ -179,3 +181,30 @@ target_link_libraries(run_sharded_journal_tests PRIVATE gtest_main Threads::Thre
 target_include_directories(run_sharded_journal_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_compile_features(run_sharded_journal_tests PRIVATE cxx_std_17)
 add_test(NAME sharded_journal_tests COMMAND run_sharded_journal_tests)
+
+# ------------------------------------------------------------
+# Feature F: Inline-slot Journal Ring Buffer tests
+# ------------------------------------------------------------
+
+add_executable(run_journal_ring_tests
+    tests/test_journal_ring.cpp
+    src/JournalRingBuffer.cpp
+)
+
+target_link_libraries(run_journal_ring_tests PRIVATE
+    gtest_main
+    Threads::Threads
+)
+
+target_include_directories(run_journal_ring_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+target_compile_features(run_journal_ring_tests PRIVATE
+    cxx_std_17
+)
+
+add_test(
+    NAME journal_ring_tests
+    COMMAND run_journal_ring_tests
+)
