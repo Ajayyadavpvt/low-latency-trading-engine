@@ -17,7 +17,6 @@ enum class STPPolicy {
     CANCEL_BOTH
 };
 
-// Result returned by replaceOrder — success flag plus any trades generated.
 struct ReplaceResult {
     bool success = false;
     std::vector<Trade> trades;
@@ -31,12 +30,17 @@ public:
     OrderBook(const OrderBook&) = delete;
     OrderBook& operator=(const OrderBook&) = delete;
 
-    bool addOrder(const Order& order);   // <-- CHANGED: void to bool
+    bool addOrder(const Order& order);
     bool cancelOrder(uint64_t order_id);
-    ReplaceResult replaceOrder(uint64_t order_id, double new_price, uint32_t new_qty);
+
+    ReplaceResult replaceOrder(
+        uint64_t order_id,
+        double new_price,
+        uint32_t new_qty,
+        uint64_t new_priority_seq);
+
     std::vector<Trade> matchOrder(Order& incoming);
 
-    // Recovery helpers
     bool getOrderById(uint64_t order_id, Order& out) const;
     bool applyFill(uint64_t order_id, uint32_t fill_qty);
 
@@ -44,6 +48,7 @@ public:
     double getBestAsk() const;
     size_t getOrderCount() const;
     void printBook() const;
+
     void setSTPPolicy(STPPolicy policy) { stp_policy_ = policy; }
     STPPolicy getSTPPolicy() const { return stp_policy_; }
 
@@ -74,4 +79,4 @@ private:
     size_t findAskLevel(double price) const;
 };
 
-#endif // ORDERBOOK_H
+#endif

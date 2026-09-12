@@ -461,3 +461,125 @@ TEST_F(JournalTest, PrioritySequencePreservedAcrossRecovery) {
     recovered.processOrder(d);
     EXPECT_EQ(d.priority_seq, 3u);
 }
+
+// =============================================================================
+// Feature E: Priority / Replace / Overflow Tests
+// =============================================================================
+
+TEST_F(JournalTest, ReplacePriceChangeGetsNewPriority) {
+    MatchingEngine engine;
+
+    Order first(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    engine.processOrder(first);
+
+    Order stored;
+    ASSERT_TRUE(engine.getOrderById(1, stored));
+    const auto old_priority = stored.priority_seq;
+
+    auto result = engine.replaceOrder(1, 101.0, 10);
+    ASSERT_TRUE(result.success);
+
+    ASSERT_TRUE(engine.getOrderById(1, stored));
+    EXPECT_GT(stored.priority_seq, old_priority);
+}
+
+TEST_F(JournalTest, ReplaceQuantityIncreaseGetsNewPriority) {
+    MatchingEngine engine;
+
+    Order first(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    engine.processOrder(first);
+
+    Order stored;
+    ASSERT_TRUE(engine.getOrderById(1, stored));
+    const auto old_priority = stored.priority_seq;
+
+    auto result = engine.replaceOrder(1, 100.0, 20);
+    ASSERT_TRUE(result.success);
+
+    ASSERT_TRUE(engine.getOrderById(1, stored));
+    EXPECT_GT(stored.priority_seq, old_priority);
+}
+
+TEST_F(JournalTest, ReplaceQuantityDecreasePreservesPriority) {
+    MatchingEngine engine;
+
+    Order first(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 20, 1);
+    engine.processOrder(first);
+
+    Order stored;
+    ASSERT_TRUE(engine.getOrderById(1, stored));
+    const auto old_priority = stored.priority_seq;
+
+    auto result = engine.replaceOrder(1, 100.0, 10);
+    ASSERT_TRUE(result.success);
+
+    ASSERT_TRUE(engine.getOrderById(1, stored));
+    EXPECT_EQ(stored.priority_seq, old_priority);
+    EXPECT_EQ(stored.remaining_quantity, 10u);
+}
+
+TEST_F(JournalTest, MissingCancelDoesNotSucceed) {
+    MatchingEngine engine;
+    EXPECT_FALSE(engine.cancelOrder(999999));
+    EXPECT_EQ(engine.getOrderCount(), 0u);
+}
+
+TEST_F(JournalTest, MissingReplaceDoesNotConsumePriority) {
+    MatchingEngine engine;
+
+    const auto before = engine.peekNextPriority();
+    auto result = engine.replaceOrder(999999, 100.0, 10);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(engine.peekNextPriority(), before);
+}
+
+TEST_F(JournalTest, PriorityOverflowHaltsEngine) {
+    MatchingEngine engine;
+
+    ASSERT_TRUE(engine.seedPrioritySequence(UINT64_MAX));
+
+    Order order(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+    auto trades = engine.processOrder(order);
+
+    EXPECT_TRUE(trades.empty());
+    EXPECT_TRUE(engine.isHalted());
+    EXPECT_FALSE(engine.isHealthy());
+}
+
+TEST_F(JournalTest, BackwardPrioritySeedRejected) {
+    MatchingEngine engine;
+
+    ASSERT_TRUE(engine.seedPrioritySequence(10));
+    EXPECT_FALSE(engine.seedPrioritySequence(9));
+    EXPECT_EQ(engine.peekNextPriority(), 10u);
+}
+
+TEST_F(JournalTest, RecoverySeedsNextPriorityAutomatically) {
+    {
+        MarketDataPublisher pub;
+        Journal journal(file_path_, 1024);
+        pub.subscribe(&journal);
+
+        MatchingEngine engine;
+        engine.setMarketDataPublisher(&pub);
+        std::atomic<uint64_t> seq{0};
+        engine.setSequenceCounter(&seq);
+
+        Order a(1, 100, OrderSide::BUY, OrderType::LIMIT, 100.0, 10, 1);
+        engine.processOrder(a);
+        Order b(2, 200, OrderSide::BUY, OrderType::LIMIT, 99.0, 10, 1);
+        engine.processOrder(b);
+        Order c(3, 300, OrderSide::BUY, OrderType::LIMIT, 98.0, 10, 1);
+        engine.processOrder(c);
+
+        journal.flush();
+    }
+
+    MatchingEngine recovered;
+    Recovery recovery(file_path_);
+    ASSERT_TRUE(recovery.replay(recovered));
+
+    // Auto-seed happened during replay; next priority should be 3
+    EXPECT_EQ(recovered.peekNextPriority(), 3u);
+    EXPECT_TRUE(recovered.isReady());
+}

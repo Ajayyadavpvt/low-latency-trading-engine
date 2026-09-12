@@ -9,69 +9,46 @@
     #include <sys/stat.h>
     #define JOURNAL_OPEN_FLAGS (O_RDWR | O_CREAT | O_BINARY)
     #define JOURNAL_OPEN_MODE  (_S_IREAD | _S_IWRITE)
-
-    static int j_open(const char* path, int flags, int mode) {
-        return _open(path, flags, mode);
-    }
+    static int j_open(const char* p, int f, int m) { return _open(p, f, m); }
     static int j_close(int fd) { return _close(fd); }
-    static long long j_lseek(int fd, long long off, int whence) {
-        return _lseeki64(fd, off, whence);
-    }
-    static int j_read(int fd, void* buf, std::size_t count) {
-        return _read(fd, buf, static_cast<unsigned int>(count));
-    }
-    static int j_write(int fd, const void* buf, std::size_t count) {
-        return _write(fd, buf, static_cast<unsigned int>(count));
-    }
+    static long long j_lseek(int fd, long long o, int w) { return _lseeki64(fd, o, w); }
+    static int j_read(int fd, void* b, std::size_t n) { return _read(fd, b, (unsigned)n); }
+    static int j_write(int fd, const void* b, std::size_t n) { return _write(fd, b, (unsigned)n); }
     static int j_sync(int fd) { return _commit(fd); }
 #else
     #include <fcntl.h>
     #include <unistd.h>
     #define JOURNAL_OPEN_FLAGS (O_RDWR | O_CREAT)
     #define JOURNAL_OPEN_MODE  (0644)
-
-    static int j_open(const char* path, int flags, int mode) {
-        return ::open(path, flags, mode);
-    }
+    static int j_open(const char* p, int f, int m) { return ::open(p, f, m); }
     static int j_close(int fd) { return ::close(fd); }
-    static long long j_lseek(int fd, long long off, int whence) {
-        return static_cast<long long>(::lseek(fd, off, whence));
-    }
-    static int j_read(int fd, void* buf, std::size_t count) {
-        return static_cast<int>(::read(fd, buf, count));
-    }
-    static int j_write(int fd, const void* buf, std::size_t count) {
-        return static_cast<int>(::write(fd, buf, count));
-    }
+    static long long j_lseek(int fd, long long o, int w) { return (long long)::lseek(fd, o, w); }
+    static int j_read(int fd, void* b, std::size_t n) { return (int)::read(fd, b, n); }
+    static int j_write(int fd, const void* b, std::size_t n) { return (int)::write(fd, b, n); }
     static int j_sync(int fd) { return ::fdatasync(fd); }
 #endif
 
 namespace {
-
 bool writeAll(int fd, const void* data, std::size_t size) {
     const std::uint8_t* p = static_cast<const std::uint8_t*>(data);
-    std::size_t remaining = size;
-    while (remaining > 0) {
-        int n = j_write(fd, p, remaining);
+    std::size_t rem = size;
+    while (rem > 0) {
+        int n = j_write(fd, p, rem);
         if (n <= 0) return false;
-        p += n;
-        remaining -= static_cast<std::size_t>(n);
+        p += n; rem -= (std::size_t)n;
     }
     return true;
 }
-
 bool readAll(int fd, void* data, std::size_t size) {
     std::uint8_t* p = static_cast<std::uint8_t*>(data);
-    std::size_t remaining = size;
-    while (remaining > 0) {
-        int n = j_read(fd, p, remaining);
+    std::size_t rem = size;
+    while (rem > 0) {
+        int n = j_read(fd, p, rem);
         if (n <= 0) return false;
-        p += n;
-        remaining -= static_cast<std::size_t>(n);
+        p += n; rem -= (std::size_t)n;
     }
     return true;
 }
-
 std::uint32_t crc_table[256];
 std::once_flag crc_once;
 void initializeCRC32() {
@@ -86,14 +63,13 @@ void initializeCRC32() {
         }
     });
 }
-
-} // namespace
+}
 
 std::uint32_t Journal::crc32(const std::uint8_t* data, std::size_t size) noexcept {
     initializeCRC32();
     std::uint32_t crc = 0xFFFFFFFFU;
     for (std::size_t i = 0; i < size; ++i) {
-        std::uint8_t index = static_cast<std::uint8_t>((crc ^ data[i]) & 0xFFU);
+        std::uint8_t index = (std::uint8_t)((crc ^ data[i]) & 0xFFU);
         crc = (crc >> 8U) ^ crc_table[index];
     }
     return crc ^ 0xFFFFFFFFU;
@@ -113,91 +89,38 @@ void Journal::appendI64BE(std::vector<std::uint8_t>& out, std::int64_t v) {
 
 Journal::Journal(const std::string& file_path, std::size_t queue_capacity)
     : file_path_(file_path), queue_capacity_(queue_capacity) {
-    if (queue_capacity_ == 0) {
-        throw std::invalid_argument("Journal: queue capacity must be > 0");
-    }
-
+    if (queue_capacity_ == 0) throw std::invalid_argument("Journal: queue capacity must be > 0");
     fd_ = j_open(file_path_.c_str(), JOURNAL_OPEN_FLAGS, JOURNAL_OPEN_MODE);
-    if (fd_ < 0) {
-        healthy_.store(false, std::memory_order_release);
-        throw std::runtime_error("Journal: cannot open file: " + file_path_);
-    }
+    if (fd_ < 0) { healthy_.store(false); throw std::runtime_error("Journal: cannot open file"); }
 
     long long file_size = j_lseek(fd_, 0, SEEK_END);
-    if (file_size < 0) {
-        j_close(fd_);
-        fd_ = -1;
-        healthy_.store(false, std::memory_order_release);
-        throw std::runtime_error("Journal: seek end failed");
-    }
+    if (file_size < 0) { j_close(fd_); fd_ = -1; healthy_.store(false); throw std::runtime_error("Journal: seek failed"); }
 
     if (file_size > 0) {
-        if (file_size < 5) {
-            j_close(fd_);
-            fd_ = -1;
-            healthy_.store(false, std::memory_order_release);
-            throw std::runtime_error("Journal: truncated header");
-        }
-        if (j_lseek(fd_, 0, SEEK_SET) < 0) {
-            j_close(fd_);
-            fd_ = -1;
-            healthy_.store(false, std::memory_order_release);
-            throw std::runtime_error("Journal: seek start failed");
-        }
-        char magic[4];
-        std::uint8_t version = 0;
+        if (file_size < 5) { j_close(fd_); fd_ = -1; healthy_.store(false); throw std::runtime_error("Journal: truncated header"); }
+        j_lseek(fd_, 0, SEEK_SET);
+        char magic[4]; std::uint8_t version = 0;
         if (!readAll(fd_, magic, 4) || !readAll(fd_, &version, 1)) {
-            j_close(fd_);
-            fd_ = -1;
-            healthy_.store(false, std::memory_order_release);
-            throw std::runtime_error("Journal: cannot read header");
+            j_close(fd_); fd_ = -1; healthy_.store(false); throw std::runtime_error("Journal: cannot read header");
         }
         if (std::memcmp(magic, kMagic, 4) != 0 || version != kVersion) {
-            j_close(fd_);
-            fd_ = -1;
-            healthy_.store(false, std::memory_order_release);
-            throw std::runtime_error("Journal: incompatible or corrupt header");
+            j_close(fd_); fd_ = -1; healthy_.store(false); throw std::runtime_error("Journal: incompatible header");
         }
     }
-
-    if (j_lseek(fd_, 0, SEEK_END) < 0) {
-        j_close(fd_);
-        fd_ = -1;
-        healthy_.store(false, std::memory_order_release);
-        throw std::runtime_error("Journal: seek end failed");
-    }
-
-    if (file_size == 0) {
-        if (!writeHeader()) {
-            j_close(fd_);
-            fd_ = -1;
-            healthy_.store(false, std::memory_order_release);
-            throw std::runtime_error("Journal: failed to write header");
-        }
-    }
-
+    j_lseek(fd_, 0, SEEK_END);
+    if (file_size == 0) { if (!writeHeader()) { j_close(fd_); fd_ = -1; healthy_.store(false); throw std::runtime_error("Journal: header write failed"); } }
     owner_thread_id_ = std::this_thread::get_id();
-
     running_.store(true, std::memory_order_release);
     writer_thread_ = std::thread(&Journal::writerThread, this);
 }
 
 Journal::~Journal() {
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        running_.store(false, std::memory_order_release);
-    }
+    { std::lock_guard<std::mutex> lock(queue_mutex_); running_.store(false); }
     queue_cv_.notify_all();
     if (writer_thread_.joinable()) writer_thread_.join();
-
     flush();
-
     std::lock_guard<std::mutex> lock(file_mutex_);
-    if (fd_ >= 0) {
-        j_sync(fd_);
-        j_close(fd_);
-        fd_ = -1;
-    }
+    if (fd_ >= 0) { j_sync(fd_); j_close(fd_); fd_ = -1; }
 }
 
 void Journal::setSyncPolicy(SyncPolicy policy, std::size_t n) {
@@ -210,55 +133,37 @@ void Journal::setSyncPolicy(SyncPolicy policy, std::size_t n) {
 bool Journal::writeHeader() {
     std::lock_guard<std::mutex> lock(file_mutex_);
     if (fd_ < 0) return false;
-
-    std::uint8_t buf[5];
-    std::memcpy(buf, kMagic, 4);
-    buf[4] = kVersion;
+    std::uint8_t buf[5]; std::memcpy(buf, kMagic, 4); buf[4] = kVersion;
     return writeAll(fd_, buf, sizeof(buf));
 }
 
 bool Journal::enqueue(JournalRecord&& record) noexcept {
     try {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        if (!running_.load(std::memory_order_acquire)) {
-            healthy_.store(false, std::memory_order_release);
-            return false;
-        }
-        if (queue_.size() >= queue_capacity_) {
-            healthy_.store(false, std::memory_order_release);
-            return false;
-        }
+        if (!running_.load(std::memory_order_acquire)) { healthy_.store(false); return false; }
+        if (queue_.size() >= queue_capacity_) { healthy_.store(false); return false; }
         queue_.emplace_back(std::move(record));
         ++queued_records_;
-    } catch (...) {
-        healthy_.store(false, std::memory_order_release);
-        return false;
-    }
+    } catch (...) { healthy_.store(false); return false; }
     queue_cv_.notify_one();
     return true;
 }
 
 bool Journal::doFdatasync() {
     if (fd_ < 0) return false;
-    if (j_sync(fd_) != 0) {
-        healthy_.store(false, std::memory_order_release);
-        return false;
-    }
+    if (j_sync(fd_) != 0) { healthy_.store(false); return false; }
     return true;
 }
 
 bool Journal::writeRecord(const JournalRecord& record) {
     std::vector<std::uint8_t> body;
     body.reserve(13 + record.payload.size());
-    appendU32BE(body, static_cast<std::uint32_t>(record.payload.size()));
+    appendU32BE(body, (std::uint32_t)record.payload.size());
     appendU64BE(body, record.sequence);
-    appendU8(body, static_cast<std::uint8_t>(record.command));
+    appendU8(body, (std::uint8_t)record.command);
     body.insert(body.end(), record.payload.begin(), record.payload.end());
-
     std::uint32_t checksum = crc32(body.data(), body.size());
-    std::vector<std::uint8_t> crc_bytes;
-    crc_bytes.reserve(4);
-    appendU32BE(crc_bytes, checksum);
+    std::vector<std::uint8_t> crc_bytes; crc_bytes.reserve(4); appendU32BE(crc_bytes, checksum);
 
     std::lock_guard<std::mutex> lock(file_mutex_);
     if (fd_ < 0) return false;
@@ -267,112 +172,71 @@ bool Journal::writeRecord(const JournalRecord& record) {
 
     ++records_since_sync_;
     bool should_sync = false;
-    if (sync_policy_ == SyncPolicy::PER_RECORD) {
-        should_sync = true;
-    } else if (sync_policy_ == SyncPolicy::PER_N_RECORDS) {
-        if (records_since_sync_ >= sync_every_n_) {
-            should_sync = true;
-        }
+    if (sync_policy_ == SyncPolicy::PER_RECORD) should_sync = true;
+    else if (sync_policy_ == SyncPolicy::PER_N_RECORDS) {
+        if (records_since_sync_ >= sync_every_n_) should_sync = true;
     }
-
     if (should_sync) {
-        if (j_sync(fd_) != 0) {
-            healthy_.store(false, std::memory_order_release);
-            return false;
-        }
+        if (j_sync(fd_) != 0) { healthy_.store(false); return false; }
         records_since_sync_ = 0;
     }
-
     return true;
 }
 
 void Journal::writerThread() {
     while (true) {
         JournalRecord record;
-
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_cv_.wait(lock, [this] {
-                return !queue_.empty() || !running_.load(std::memory_order_acquire);
-            });
-
-            if (queue_.empty() && !running_.load(std::memory_order_acquire)) {
-                break;
-            }
-
+            queue_cv_.wait(lock, [this] { return !queue_.empty() || !running_.load(std::memory_order_acquire); });
+            if (queue_.empty() && !running_.load(std::memory_order_acquire)) break;
             record = std::move(queue_.front());
             queue_.pop_front();
         }
-
         const bool ok = writeRecord(record);
-
         {
             std::lock_guard<std::mutex> lock(queue_mutex_);
-            if (ok) {
-                ++written_records_;
-                last_written_sequence_.store(record.sequence, std::memory_order_release);
-            } else {
-                healthy_.store(false, std::memory_order_release);
-                running_.store(false, std::memory_order_release);
-            }
+            if (ok) { ++written_records_; last_written_sequence_.store(record.sequence, std::memory_order_release); }
+            else { healthy_.store(false); running_.store(false); }
             drained_cv_.notify_all();
         }
-
-        if (!ok) {
-            queue_cv_.notify_all();
-            break;
-        }
+        if (!ok) { queue_cv_.notify_all(); break; }
     }
 }
 
 bool Journal::waitUntilWritten(std::uint64_t target) {
     std::unique_lock<std::mutex> lock(queue_mutex_);
     drained_cv_.wait(lock, [this, target] {
-        return written_records_ >= target ||
-               !healthy_.load(std::memory_order_acquire);
+        return written_records_ >= target || !healthy_.load(std::memory_order_acquire);
     });
     return healthy_.load(std::memory_order_acquire);
 }
 
 bool Journal::flush() {
     std::uint64_t target;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        target = queued_records_;
-    }
-
-    if (!waitUntilWritten(target)) {
-        return false;
-    }
-
+    { std::lock_guard<std::mutex> lock(queue_mutex_); target = queued_records_; }
+    if (!waitUntilWritten(target)) return false;
     return healthy_.load(std::memory_order_acquire);
 }
 
 bool Journal::sync() {
-    if (!flush()) {
-        return false;
-    }
-
+    if (!flush()) return false;
     std::lock_guard<std::mutex> lock(file_mutex_);
-    if (!doFdatasync()) {
-        return false;
-    }
+    if (!doFdatasync()) return false;
     records_since_sync_ = 0;
     return true;
 }
 
 void Journal::onEvent(const MarketEvent& event) noexcept {
 #ifndef NDEBUG
-    assert(std::this_thread::get_id() == owner_thread_id_ &&
-           "Journal::onEvent called from a different thread — "
-           "one Journal per shard, single producer only");
+    assert(std::this_thread::get_id() == owner_thread_id_ && "Journal::onEvent wrong thread");
 #endif
-
     try {
         if (std::holds_alternative<OrderAcceptedEvent>(event)) {
             const auto& e = std::get<OrderAcceptedEvent>(event);
             std::vector<std::uint8_t> payload;
-            payload.reserve(58);
+            // Exact size: 8+8+4+4+1+8+4+4+1+8 = 50 bytes
+            payload.reserve(50);
             appendU64BE(payload, e.timestamp);
             appendU64BE(payload, e.orderId);
             appendU32BE(payload, e.symbolId);
@@ -381,14 +245,13 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
             appendI64BE(payload, e.priceTicks);
             appendU32BE(payload, e.quantity);
             appendU32BE(payload, e.remainingQuantity);
-            appendU8(payload, static_cast<std::uint8_t>(e.orderType));
-            appendU64BE(payload, e.prioritySeq);   // <-- Feature E
+            appendU8(payload, (std::uint8_t)e.orderType);
+            appendU64BE(payload, e.prioritySeq);
             JournalRecord record(e.sequence, JournalCommand::NEW_ORDER, std::move(payload));
             enqueue(std::move(record));
         } else if (std::holds_alternative<OrderCancelledEvent>(event)) {
             const auto& e = std::get<OrderCancelledEvent>(event);
-            std::vector<std::uint8_t> payload;
-            payload.reserve(16);
+            std::vector<std::uint8_t> payload; payload.reserve(16);
             appendU64BE(payload, e.timestamp);
             appendU64BE(payload, e.orderId);
             JournalRecord record(e.sequence, JournalCommand::CANCEL_ORDER, std::move(payload));
@@ -396,7 +259,8 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
         } else if (std::holds_alternative<TradeEvent>(event)) {
             const auto& e = std::get<TradeEvent>(event);
             std::vector<std::uint8_t> payload;
-            payload.reserve(48);
+            // Exact size: 8+8+8+4+4+4+8+1 = 45 bytes
+            payload.reserve(45);
             appendU64BE(payload, e.timestamp);
             appendU64BE(payload, e.restingOrderId);
             appendU64BE(payload, e.aggressorOrderId);
@@ -408,7 +272,5 @@ void Journal::onEvent(const MarketEvent& event) noexcept {
             JournalRecord record(e.sequence, JournalCommand::FILL, std::move(payload));
             enqueue(std::move(record));
         }
-    } catch (...) {
-        healthy_.store(false, std::memory_order_release);
-    }
+    } catch (...) { healthy_.store(false); }
 }
