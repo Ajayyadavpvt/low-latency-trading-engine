@@ -132,10 +132,17 @@ target_include_directories(run_stress_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME stress_tests COMMAND run_stress_tests)
 set_tests_properties(stress_tests PROPERTIES TIMEOUT 900)
 
+# ------------------------------------------------------------
 # RiskEngine tests
+# ------------------------------------------------------------
+# NOTE: src/OrderBook.cpp added because checkInvariant() tests
+#       construct an OrderBook and call addOrder/cancelOrder/
+#       getOrderCount/getOrderById — the linker needs these symbols.
+# ------------------------------------------------------------
 add_executable(run_riskengine_tests
     tests/test_riskengine.cpp
     src/RiskEngine.cpp
+    src/OrderBook.cpp
 )
 target_link_libraries(run_riskengine_tests PRIVATE gtest_main)
 target_include_directories(run_riskengine_tests PRIVATE ${CMAKE_SOURCE_DIR}/include)

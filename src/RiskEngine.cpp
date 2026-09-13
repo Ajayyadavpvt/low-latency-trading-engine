@@ -1,40 +1,35 @@
 #include "RiskEngine.h"
+#include "OrderBook.h"   // for checkInvariant()
 
-#include <cassert>
 #include <cmath>
 #include <limits>
 
 namespace {
 
-constexpr int64_t INT64_MAX_VALUE =
-    std::numeric_limits<int64_t>::max();
-
-constexpr int64_t INT64_MIN_VALUE =
-    std::numeric_limits<int64_t>::min();
+constexpr int64_t INT64_MAX_VALUE = std::numeric_limits<int64_t>::max();
+constexpr int64_t INT64_MIN_VALUE = std::numeric_limits<int64_t>::min();
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
 void RiskEngine::setMaxOrderSize(uint64_t max_qty) noexcept {
-    // All quantities eventually participate in signed position
-    // calculations, so keep them representable as int64_t.
     if (max_qty > static_cast<uint64_t>(INT64_MAX_VALUE)) {
         return;
     }
-
     max_order_qty_ = max_qty;
 }
 
 void RiskEngine::setMaxPosition(uint64_t max_pos) noexcept {
-    // Position calculations use int64_t.
     if (max_pos > static_cast<uint64_t>(INT64_MAX_VALUE)) {
         return;
     }
-
     max_position_ = max_pos;
 
-    // Make sure the configured order limit cannot itself exceed
-    // the position limit if the caller expects position-based
-    // reservation to remain bounded.
+    // Preserve the existing configuration invariant:
+    // order-size ceiling cannot exceed position ceiling.
     if (max_order_qty_ > max_position_) {
         max_order_qty_ = max_position_;
     }
@@ -44,260 +39,166 @@ void RiskEngine::setPriceBandPct(double pct) noexcept {
     if (!std::isfinite(pct)) {
         return;
     }
-
-    // 100% would allow a zero lower bound.
-    // Negative bands are nonsensical.
     if (pct < 0.0 || pct >= 100.0) {
         return;
     }
-
     price_band_pct_ = pct;
 }
 
 bool RiskEngine::setReferencePrice(SymbolId symbol, double price) {
-    const std::size_t symbol_id =
-        static_cast<std::size_t>(symbol);
-
+    const std::size_t symbol_id = static_cast<std::size_t>(symbol);
     if (symbol_id >= MAX_SYMBOLS) {
         return false;
     }
-
     if (!std::isfinite(price) || price <= 0.0) {
         return false;
     }
 
-    if (symbol_id >= ref_prices_.size()) {
-        ref_prices_.resize(symbol_id + 1, 0.0);
-        ref_price_set_.resize(symbol_id + 1, 0);
+    try {
+        if (symbol_id >= ref_prices_.size()) {
+            ref_prices_.resize(symbol_id + 1, 0.0);
+            ref_price_set_.resize(symbol_id + 1, 0);
+        }
+    } catch (...) {
+        return false;
     }
 
-    ref_prices_[symbol_id] = price;
-    ref_price_set_[symbol_id] = 1;
-
+    ref_prices_[symbol_id]     = price;
+    ref_price_set_[symbol_id]  = 1;
     return true;
 }
 
 void RiskEngine::reservePositions(std::size_t expected_pairs) {
-    // Set load factor BEFORE reserve so reserve() calculates the
-    // bucket count using the desired load factor.
     positions_.max_load_factor(0.70f);
     positions_.reserve(expected_pairs);
+
+    // order_risk_ typically holds 1-2x the active (trader, symbol) pair
+    // count because each pair can have multiple working orders.
+    order_risk_.max_load_factor(0.70f);
+    order_risk_.reserve(expected_pairs * 2);
 }
 
-bool RiskEngine::canAddSigned(
-    int64_t a,
-    int64_t b,
-    int64_t& result) noexcept {
+// ---------------------------------------------------------------------------
+// Arithmetic helpers
+// ---------------------------------------------------------------------------
 
-    if (b > 0 && a > INT64_MAX_VALUE - b) {
-        return false;
-    }
-
-    if (b < 0 && a < INT64_MIN_VALUE - b) {
-        return false;
-    }
-
+bool RiskEngine::canAddSigned(int64_t a, int64_t b, int64_t& result) noexcept {
+    if (b > 0 && a > INT64_MAX_VALUE - b) return false;
+    if (b < 0 && a < INT64_MIN_VALUE - b) return false;
     result = a + b;
     return true;
 }
 
-bool RiskEngine::canSubSigned(
-    int64_t a,
-    int64_t b,
-    int64_t& result) noexcept {
-
-    if (b > 0 && a < INT64_MIN_VALUE + b) {
-        return false;
-    }
-
-    if (b < 0 && a > INT64_MAX_VALUE + b) {
-        return false;
-    }
-
+bool RiskEngine::canSubSigned(int64_t a, int64_t b, int64_t& result) noexcept {
+    if (b > 0 && a < INT64_MIN_VALUE + b) return false;
+    if (b < 0 && a > INT64_MAX_VALUE + b) return false;
     result = a - b;
     return true;
 }
 
-bool RiskEngine::canAddUnsigned(
-    uint64_t a,
-    uint64_t b,
-    uint64_t& result) noexcept {
-
-    if (a > std::numeric_limits<uint64_t>::max() - b) {
-        return false;
-    }
-
+bool RiskEngine::canAddUnsigned(uint64_t a, uint64_t b,
+                                uint64_t& result) noexcept {
+    if (a > std::numeric_limits<uint64_t>::max() - b) return false;
     result = a + b;
     return true;
 }
 
-RiskRejectReason RiskEngine::validate(
-    const Order& order) const noexcept {
+// ---------------------------------------------------------------------------
+// Field-level validation (shared by validate / validateReplace)
+// ---------------------------------------------------------------------------
 
-    // ------------------------------------------------------------
-    // 1. Quantity
-    // ------------------------------------------------------------
-
+RiskRejectReason RiskEngine::checkOrderFields(const Order& order) const noexcept {
+    // Quantity
     if (order.quantity == 0) {
         return RiskRejectReason::INVALID_QUANTITY;
     }
-
     if (order.quantity > max_order_qty_) {
         return RiskRejectReason::ORDER_TOO_LARGE;
     }
 
-    // max_order_qty_ was configured to fit in int64_t.
-    const int64_t qty =
-        static_cast<int64_t>(order.quantity);
-
-    const int64_t max_pos =
-        static_cast<int64_t>(max_position_);
-
-    // ------------------------------------------------------------
-    // 2. Symbol
-    // ------------------------------------------------------------
-
-    const std::size_t symbol_id =
-        static_cast<std::size_t>(order.symbol_id);
-
-    if (symbol_id >= MAX_SYMBOLS) {
+    // Symbol
+    const std::size_t symbol_id = static_cast<std::size_t>(order.symbol_id);
+    if (symbol_id >= MAX_SYMBOLS ||
+        symbol_id >= ref_prices_.size() ||
+        ref_price_set_[symbol_id] == 0) {
         return RiskRejectReason::INVALID_SYMBOL;
     }
 
-    if (symbol_id >= ref_prices_.size()) {
-        return RiskRejectReason::INVALID_SYMBOL;
-    }
-
-    if (ref_price_set_[symbol_id] == 0) {
-        return RiskRejectReason::INVALID_SYMBOL;
-    }
-
-    // ------------------------------------------------------------
-    // 3. Price validation
-    // ------------------------------------------------------------
-
+    // Price (not applicable for MARKET)
     if (order.type != OrderType::MARKET) {
-
-        if (!std::isfinite(order.price) ||
-            order.price <= 0.0) {
+        if (!std::isfinite(order.price) || order.price <= 0.0) {
             return RiskRejectReason::INVALID_PRICE;
         }
 
         const double ref = ref_prices_[symbol_id];
-
         if (!std::isfinite(ref) || ref <= 0.0) {
             return RiskRejectReason::INVALID_SYMBOL;
         }
 
-        const double band =
-            price_band_pct_ / 100.0;
+        const double band  = price_band_pct_ / 100.0;
+        const double upper = ref * (1.0 + band);
+        const double lower = ref * (1.0 - band);
 
-        const double upper =
-            ref * (1.0 + band);
-
-        const double lower =
-            ref * (1.0 - band);
-
-        if (!std::isfinite(upper) ||
-            !std::isfinite(lower)) {
+        if (!std::isfinite(upper) || !std::isfinite(lower)) {
             return RiskRejectReason::INVALID_PRICE;
         }
-
-        if (order.price < lower ||
-            order.price > upper) {
+        if (order.price < lower || order.price > upper) {
             return RiskRejectReason::PRICE_BAND_VIOLATION;
         }
     }
 
-    // ------------------------------------------------------------
-    // 4. Position / working exposure
-    // ------------------------------------------------------------
+    return RiskRejectReason::NONE;
+}
 
-    PositionKey key{
-        order.trader_id,
-        order.symbol_id
-    };
+// ---------------------------------------------------------------------------
+// Side-effect-free validation
+// ---------------------------------------------------------------------------
 
-    const auto it = positions_.find(key);
-
-    const int64_t position =
-        (it != positions_.end())
-            ? it->second.position
-            : 0;
-
-    const uint64_t working_buy_u =
-        (it != positions_.end())
-            ? it->second.working_buy
-            : 0;
-
-    const uint64_t working_sell_u =
-        (it != positions_.end())
-            ? it->second.working_sell
-            : 0;
-
-    // These should always be <= max_position_ because accepted
-    // working orders are bounded by the risk engine.
-    if (working_buy_u > max_position_ ||
-        working_sell_u > max_position_) {
-        return RiskRejectReason::STATE_VIOLATION;
+RiskRejectReason RiskEngine::validate(const Order& order) const noexcept {
+    if (state_corrupt_) {
+        return RiskRejectReason::STATE_CORRUPT;
     }
 
-    const int64_t working_buy =
-        static_cast<int64_t>(working_buy_u);
+    const RiskRejectReason field_reason = checkOrderFields(order);
+    if (field_reason != RiskRejectReason::NONE) {
+        return field_reason;
+    }
 
-    const int64_t working_sell =
-        static_cast<int64_t>(working_sell_u);
+    const int64_t qty     = static_cast<int64_t>(order.quantity);
+    const int64_t max_pos = static_cast<int64_t>(max_position_);
 
-    // ------------------------------------------------------------
-    // BUY:
-    //
-    // projected position =
-    //     current position
-    //   + existing working buys
-    //   + new order
-    //
-    // Must remain <= max_position.
-    // ------------------------------------------------------------
+    const PositionKey key{order.trader_id, order.symbol_id};
+    const auto it = positions_.find(key);
+
+    const int64_t  position = (it != positions_.end()) ? it->second.position     : 0;
+    const uint64_t wbu      = (it != positions_.end()) ? it->second.working_buy  : 0;
+    const uint64_t wsu      = (it != positions_.end()) ? it->second.working_sell : 0;
+
+    // NOTE: We deliberately do NOT gate on "wbu > max_position_" here.
+    // After recovery, current limits may legitimately be tighter than the
+    // historical working exposure that was just restored. The projection
+    // check below (position + working + qty vs. max_pos) is the correct
+    // place to catch any real overflow or limit violation.
 
     if (order.side == OrderSide::BUY) {
-
         int64_t projected = 0;
-
-        if (!canAddSigned(position, working_buy, projected)) {
+        if (!canAddSigned(position, static_cast<int64_t>(wbu), projected)) {
             return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
         }
-
         if (!canAddSigned(projected, qty, projected)) {
             return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
         }
-
         if (projected > max_pos) {
             return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
         }
-
     } else {
-
-        // --------------------------------------------------------
-        // SELL:
-        //
-        // projected position =
-        //     current position
-        //   - existing working sells
-        //   - new order
-        //
-        // Must remain >= -max_position.
-        // --------------------------------------------------------
-
         int64_t projected = 0;
-
-        if (!canSubSigned(position, working_sell, projected)) {
+        if (!canSubSigned(position, static_cast<int64_t>(wsu), projected)) {
             return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
         }
-
         if (!canSubSigned(projected, qty, projected)) {
             return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
         }
-
         if (projected < -max_pos) {
             return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
         }
@@ -306,233 +207,415 @@ RiskRejectReason RiskEngine::validate(
     return RiskRejectReason::NONE;
 }
 
-bool RiskEngine::onOrderAccepted(
-    const Order& order) noexcept {
+RiskRejectReason RiskEngine::validateReplace(
+    uint64_t old_order_id,
+    const Order& new_order) const noexcept {
 
-    // This function assumes validate(order) returned NONE.
-    //
-    // Keeping this assertion in debug builds makes accidental
-    // lifecycle misuse easier to detect.
-    const RiskRejectReason reason = validate(order);
+    if (state_corrupt_) {
+        return RiskRejectReason::STATE_CORRUPT;
+    }
 
-    if (reason != RiskRejectReason::NONE) {
+    const RiskRejectReason field_reason = checkOrderFields(new_order);
+    if (field_reason != RiskRejectReason::NONE) {
+        return field_reason;
+    }
+
+    const auto ord_it = order_risk_.find(old_order_id);
+    if (ord_it == order_risk_.end()) {
+        return RiskRejectReason::STATE_VIOLATION;
+    }
+
+    const OrderRiskInfo& old_info = ord_it->second;
+
+    // A replace cannot silently change owner, symbol, or side.
+    if (old_info.trader_id != new_order.trader_id ||
+        old_info.symbol_id != new_order.symbol_id ||
+        old_info.side      != new_order.side) {
+        return RiskRejectReason::STATE_VIOLATION;
+    }
+
+    const PositionKey key{new_order.trader_id, new_order.symbol_id};
+    const auto pos_it = positions_.find(key);
+
+    const int64_t  position = (pos_it != positions_.end()) ? pos_it->second.position : 0;
+    const uint64_t current_working =
+        (pos_it != positions_.end())
+            ? ((new_order.side == OrderSide::BUY)
+                   ? pos_it->second.working_buy
+                   : pos_it->second.working_sell)
+            : 0;
+
+    if (old_info.reserved_qty > current_working) {
+        return RiskRejectReason::STATE_CORRUPT;
+    }
+
+    uint64_t projected_working = current_working - old_info.reserved_qty;
+    if (!canAddUnsigned(projected_working, new_order.quantity,
+                        projected_working)) {
+        return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
+    }
+
+    const int64_t max_pos = static_cast<int64_t>(max_position_);
+
+    if (new_order.side == OrderSide::BUY) {
+        int64_t projected = 0;
+        if (!canAddSigned(position, static_cast<int64_t>(projected_working),
+                          projected)) {
+            return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
+        }
+        if (projected > max_pos) {
+            return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
+        }
+    } else {
+        int64_t projected = 0;
+        if (!canSubSigned(position, static_cast<int64_t>(projected_working),
+                          projected)) {
+            return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
+        }
+        if (projected < -max_pos) {
+            return RiskRejectReason::POSITION_LIMIT_EXCEEDED;
+        }
+    }
+
+    return RiskRejectReason::NONE;
+}
+
+// ---------------------------------------------------------------------------
+// Shared state transitions
+// ---------------------------------------------------------------------------
+
+bool RiskEngine::applyResting(const Order& order,
+                              uint32_t remaining_qty,
+                              bool enforce_limits) noexcept {
+
+    if (state_corrupt_) {
+        return false;
+    }
+    if (remaining_qty == 0 || remaining_qty > order.quantity) {
+        return false;
+    }
+    // Only LIMIT orders can rest. MARKET / IOC / FOK never reach the book.
+    if (order.type != OrderType::LIMIT) {
+        return false;
+    }
+    if (order_risk_.find(order.order_id) != order_risk_.end()) {
+        // Already tracked -> reject rather than double-reserve.
         return false;
     }
 
-    PositionKey key{
-        order.trader_id,
-        order.symbol_id
-    };
+    const PositionKey key{order.trader_id, order.symbol_id};
+    const uint64_t qty = static_cast<uint64_t>(remaining_qty);
 
-    auto it = positions_.find(key);
+    // Check limit BEFORE mutating state.
+    const auto pos_it = positions_.find(key);
+    const uint64_t current_working =
+        (pos_it != positions_.end())
+            ? ((order.side == OrderSide::BUY)
+                   ? pos_it->second.working_buy
+                   : pos_it->second.working_sell)
+            : 0;
 
-    if (it == positions_.end()) {
-
-        // This is the first position state for this
-        // trader/symbol pair.
-        //
-        // unordered_map may allocate here.
-        // This is why the current implementation is NOT yet
-        // strictly zero-allocation.
-        auto result = positions_.emplace(
-            key,
-            PositionState{}
-        );
-
-        if (!result.second) {
-            return false;
-        }
-
-        it = result.first;
+    uint64_t new_working = 0;
+    if (!canAddUnsigned(current_working, qty, new_working)) {
+        return false;
+    }
+    if (enforce_limits && new_working > max_position_) {
+        return false;
     }
 
-    PositionState& state = it->second;
+    // Insert per-order reservation first (smaller, easier to roll back).
+    const OrderRiskInfo info{
+        order.trader_id,
+        order.symbol_id,
+        order.side,
+        remaining_qty
+    };
 
-    if (order.side == OrderSide::BUY) {
-
-        uint64_t new_working = 0;
-
-        if (!canAddUnsigned(
-                state.working_buy,
-                order.quantity,
-                new_working)) {
+    try {
+        const auto ins = order_risk_.emplace(order.order_id, info);
+        if (!ins.second) {
             return false;
         }
+    } catch (...) {
+        return false;
+    }
 
-        if (new_working > max_position_) {
-            return false;
+    // Update or create the position state.
+    try {
+        if (pos_it == positions_.end()) {
+            const auto ins = positions_.emplace(key, PositionState{});
+            if (!ins.second) {
+                order_risk_.erase(order.order_id);
+                return false;
+            }
+            PositionState& state = ins.first->second;
+            if (order.side == OrderSide::BUY) {
+                state.working_buy = new_working;
+            } else {
+                state.working_sell = new_working;
+            }
+        } else {
+            PositionState& state = pos_it->second;
+            if (order.side == OrderSide::BUY) {
+                state.working_buy = new_working;
+            } else {
+                state.working_sell = new_working;
+            }
         }
-
-        state.working_buy = new_working;
-
-    } else {
-
-        uint64_t new_working = 0;
-
-        if (!canAddUnsigned(
-                state.working_sell,
-                order.quantity,
-                new_working)) {
-            return false;
-        }
-
-        if (new_working > max_position_) {
-            return false;
-        }
-
-        state.working_sell = new_working;
+    } catch (...) {
+        order_risk_.erase(order.order_id);
+        return false;
     }
 
     return true;
 }
 
-bool RiskEngine::onFill(
-    const Order& order,
-    uint64_t fill_qty) noexcept {
-
-    if (fill_qty == 0) {
+bool RiskEngine::applyFill(uint64_t order_id, uint32_t fill_qty) noexcept {
+    if (state_corrupt_ || fill_qty == 0) {
         return false;
     }
 
-    if (fill_qty > max_position_) {
+    const auto ord_it = order_risk_.find(order_id);
+    if (ord_it == order_risk_.end()) {
         return false;
     }
 
-    PositionKey key{
-        order.trader_id,
-        order.symbol_id
-    };
-
-    auto it = positions_.find(key);
-
-    // A fill must correspond to an existing accepted/working order.
-    // Never create a position entry merely because a fill arrived.
-    if (it == positions_.end()) {
+    OrderRiskInfo& info = ord_it->second;
+    if (fill_qty > info.reserved_qty) {
         return false;
     }
 
-    PositionState& state = it->second;
+    const PositionKey key{info.trader_id, info.symbol_id};
+    const auto pos_it = positions_.find(key);
+    if (pos_it == positions_.end()) {
+        return false;
+    }
 
-    if (order.side == OrderSide::BUY) {
+    PositionState& state = pos_it->second;
+    const int64_t signed_fill = static_cast<int64_t>(fill_qty);
+    int64_t new_position = 0;
 
+    if (info.side == OrderSide::BUY) {
         if (fill_qty > state.working_buy) {
             return false;
         }
-
-        const int64_t signed_fill =
-            static_cast<int64_t>(fill_qty);
-
-        int64_t new_position = 0;
-
-        if (!canAddSigned(
-                state.position,
-                signed_fill,
-                new_position)) {
+        if (!canAddSigned(state.position, signed_fill, new_position)) {
             return false;
         }
-
-        // State transition happens only after every check succeeds.
         state.working_buy -= fill_qty;
-        state.position = new_position;
-
+        state.position     = new_position;
     } else {
-
         if (fill_qty > state.working_sell) {
             return false;
         }
-
-        const int64_t signed_fill =
-            static_cast<int64_t>(fill_qty);
-
-        int64_t new_position = 0;
-
-        if (!canSubSigned(
-                state.position,
-                signed_fill,
-                new_position)) {
+        if (!canSubSigned(state.position, signed_fill, new_position)) {
             return false;
         }
-
         state.working_sell -= fill_qty;
-        state.position = new_position;
+        state.position      = new_position;
     }
 
-    // Fully inactive trader/symbol state can be removed.
-    if (state.position == 0 &&
-        state.working_buy == 0 &&
+    info.reserved_qty -= fill_qty;
+    if (info.reserved_qty == 0) {
+        order_risk_.erase(ord_it);
+    }
+
+    if (state.position == 0 && state.working_buy == 0 &&
         state.working_sell == 0) {
-
-        positions_.erase(it);
+        positions_.erase(pos_it);
     }
-
     return true;
 }
 
-bool RiskEngine::onOrderCancelled(
-    const Order& order,
-    uint64_t cancelled_qty) noexcept {
-
-    if (cancelled_qty == 0) {
+bool RiskEngine::applyCancelled(uint64_t order_id,
+                                uint32_t cancelled_qty) noexcept {
+    if (state_corrupt_ || cancelled_qty == 0) {
         return false;
     }
 
-    PositionKey key{
-        order.trader_id,
-        order.symbol_id
-    };
-
-    auto it = positions_.find(key);
-
-    // A cancellation must correspond to existing risk state.
-    if (it == positions_.end()) {
+    const auto ord_it = order_risk_.find(order_id);
+    if (ord_it == order_risk_.end()) {
         return false;
     }
 
-    PositionState& state = it->second;
+    OrderRiskInfo& info = ord_it->second;
+    if (cancelled_qty > info.reserved_qty) {
+        return false;
+    }
 
-    if (order.side == OrderSide::BUY) {
+    const PositionKey key{info.trader_id, info.symbol_id};
+    const auto pos_it = positions_.find(key);
+    if (pos_it == positions_.end()) {
+        return false;
+    }
 
+    PositionState& state = pos_it->second;
+
+    if (info.side == OrderSide::BUY) {
         if (cancelled_qty > state.working_buy) {
             return false;
         }
-
         state.working_buy -= cancelled_qty;
-
     } else {
-
         if (cancelled_qty > state.working_sell) {
             return false;
         }
-
         state.working_sell -= cancelled_qty;
     }
 
-    // If nothing remains associated with this trader/symbol,
-    // release the hash-table entry.
-    if (state.position == 0 &&
-        state.working_buy == 0 &&
-        state.working_sell == 0) {
-
-        positions_.erase(it);
+    info.reserved_qty -= cancelled_qty;
+    if (info.reserved_qty == 0) {
+        order_risk_.erase(ord_it);
     }
 
+    if (state.position == 0 && state.working_buy == 0 &&
+        state.working_sell == 0) {
+        positions_.erase(pos_it);
+    }
     return true;
 }
 
-int64_t RiskEngine::getPosition(
-    uint64_t trader_id,
-    SymbolId symbol) const noexcept {
+// ---------------------------------------------------------------------------
+// Live path entry points
+// ---------------------------------------------------------------------------
 
-    PositionKey key{
-        trader_id,
-        symbol
-    };
+bool RiskEngine::onOrderResting(const Order& order,
+                                uint32_t remaining_qty) noexcept {
+    return applyResting(order, remaining_qty, /*enforce_limits=*/true);
+}
 
+bool RiskEngine::onFill(uint64_t order_id, uint32_t fill_qty) noexcept {
+    return applyFill(order_id, fill_qty);
+}
+
+bool RiskEngine::onOrderCancelled(uint64_t order_id,
+                                  uint32_t cancelled_qty) noexcept {
+    return applyCancelled(order_id, cancelled_qty);
+}
+
+// ---------------------------------------------------------------------------
+// Recovery path entry points
+// ---------------------------------------------------------------------------
+// These do NOT enforce today's limits. Any inconsistency (overflow, missing
+// reservation, missing position state) marks the engine corrupt, causing
+// all future validate() calls to return STATE_CORRUPT (fail-closed).
+
+void RiskEngine::restoreAccepted(const Order& order,
+                                 uint32_t remaining_qty) noexcept {
+    const bool ok = applyResting(order, remaining_qty, /*enforce_limits=*/false);
+    if (!ok) {
+        markStateCorrupt();
+    }
+}
+
+void RiskEngine::restoreFill(uint64_t order_id, uint32_t fill_qty) noexcept {
+    const bool ok = applyFill(order_id, fill_qty);
+    if (!ok) {
+        markStateCorrupt();
+    }
+}
+
+void RiskEngine::restoreCancelled(uint64_t order_id,
+                                  uint32_t cancelled_qty) noexcept {
+    const bool ok = applyCancelled(order_id, cancelled_qty);
+    if (!ok) {
+        markStateCorrupt();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Queries
+// ---------------------------------------------------------------------------
+
+int64_t RiskEngine::getPosition(uint64_t trader_id,
+                                SymbolId symbol) const noexcept {
+    const PositionKey key{trader_id, symbol};
     const auto it = positions_.find(key);
+    return (it == positions_.end()) ? 0 : it->second.position;
+}
 
-    if (it == positions_.end()) {
-        return 0;
+bool RiskEngine::checkInvariant(const OrderBook& book) const noexcept {
+    if (state_corrupt_) {
+        return false;
     }
 
-    return it->second.position;
+    // ---- 1. Count check (pigeonhole) ----
+    // If RiskEngine tracks N orders and the book has N orders, and every
+    // tracked order exists in the book, then every book order must be
+    // tracked (nothing else can fit).
+    if (book.getOrderCount() != order_risk_.size()) {
+        return false;
+    }
+
+    // ---- 2. Per-order field check ----
+    for (const auto& entry : order_risk_) {
+        const uint64_t order_id = entry.first;
+        const OrderRiskInfo& info = entry.second;
+
+        if (info.reserved_qty == 0) {
+            return false;   // should have been erased
+        }
+
+        Order book_order;
+        if (!book.getOrderById(order_id, book_order)) {
+            return false;
+        }
+        if (book_order.order_id          != order_id)          return false;
+        if (book_order.trader_id         != info.trader_id)    return false;
+        if (book_order.symbol_id         != info.symbol_id)    return false;
+        if (book_order.side              != info.side)         return false;
+        if (book_order.remaining_quantity != info.reserved_qty) return false;
+    }
+
+    // ---- 3. Aggregate working counter check ----
+    // Verify that positions_[key].working_buy / working_sell equal the
+    // sums computed from the per-order reservations.
+    std::unordered_map<PositionKey, uint64_t, PositionKeyHash> derived_buy;
+    std::unordered_map<PositionKey, uint64_t, PositionKeyHash> derived_sell;
+
+    try {
+        derived_buy.reserve(positions_.size());
+        derived_sell.reserve(positions_.size());
+    } catch (...) {
+        return false;
+    }
+
+    for (const auto& entry : order_risk_) {
+        const OrderRiskInfo& info = entry.second;
+        const PositionKey key{info.trader_id, info.symbol_id};
+        if (info.side == OrderSide::BUY) {
+            derived_buy[key] += info.reserved_qty;
+        } else {
+            derived_sell[key] += info.reserved_qty;
+        }
+    }
+
+    for (const auto& entry : positions_) {
+        const PositionKey& key = entry.first;
+        const PositionState& state = entry.second;
+
+        const auto it_b = derived_buy.find(key);
+        const auto it_s = derived_sell.find(key);
+        const uint64_t act_buy =
+            (it_b != derived_buy.end()) ? it_b->second : 0;
+        const uint64_t act_sell =
+            (it_s != derived_sell.end()) ? it_s->second : 0;
+
+        if (state.working_buy  != act_buy)  return false;
+        if (state.working_sell != act_sell) return false;
+    }
+
+    // ---- 4. No orphan derived keys ----
+    for (const auto& entry : derived_buy) {
+        if (positions_.find(entry.first) == positions_.end()) {
+            return false;
+        }
+    }
+    for (const auto& entry : derived_sell) {
+        if (positions_.find(entry.first) == positions_.end()) {
+            return false;
+        }
+    }
+
+    return true;
 }
