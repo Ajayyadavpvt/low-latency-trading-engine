@@ -279,7 +279,7 @@ MIT
 
 ## Author
 
-Ajay Yadav — [GitHub](https://github.com/Rareajayyadav)
+Ajay Yadav — [GitHub](https://github.com/ajayyadavpvt)
 
 ---
 
